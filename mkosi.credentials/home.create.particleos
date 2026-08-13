@@ -1,0 +1,18 @@
+{
+    "userName": "particleos",
+    "uid": 1000,
+    "gid": 1000,
+    "disposition": "regular",
+    "enforcePasswordPolicy": false,
+    "memberOf": [
+        "sudo",
+        "wheel",
+        "systemd-journal"
+    ],
+    "secret": {
+        "password": ["particleos"]
+    },
+    "privileged": {
+        "hashedPassword": ["$1$idWouTQ8$ez22l/yqjROCxwZ27R1kO."]
+    }
+}

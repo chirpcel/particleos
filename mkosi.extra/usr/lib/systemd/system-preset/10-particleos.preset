@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+# Make sure we have networking available.
+enable systemd-networkd.service
+enable systemd-networkd-wait-online.service
+enable systemd-resolved.service
+
+# These are not enabled by default in the default systemd preset.
+enable systemd-timesyncd.service
+enable systemd-homed-firstboot.service
+
+enable pcscd.service
+
+# Our own service to run systemctl preset --global.
+enable preset-global.service
+
+# Prefer socket activated SSH over daemon SSH
+disable sshd.service
+disable ssh.service
+enable sshd.socket
+enable ssh.socket
+enable sshd-keygen.service
