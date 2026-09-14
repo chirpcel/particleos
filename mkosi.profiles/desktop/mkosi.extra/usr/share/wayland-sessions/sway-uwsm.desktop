@@ -1,0 +1,5 @@
+[Desktop Entry]
+Name=Sway (UWSM)
+Exec=uwsm start -N "Sway" -D sway:wlroots -C "Sway (UWSM)" -- sway
+DesktopNames=sway;wlroots
+Type=Application

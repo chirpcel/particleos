@@ -1,0 +1,37 @@
+[display]
+show_time = true
+align_greeting = "center"
+issue = true
+
+[layout]
+width = 60
+window_padding = 2
+container_padding = 1
+prompt_padding = 1
+
+[layout.widgets]
+time_position = "top"
+status_position = "bottom"
+
+[remember]
+username = true
+session = false
+user_session = true
+
+[user_menu]
+enabled = true
+
+[secret]
+mode = "characters"
+characters = "*"
+
+[background]
+kind = "doom"
+fps = 30
+
+[background.doom]
+height = 6
+spread = 2
+top_color = "#cc241d"
+middle_color = "#d79921"
+bottom_color = "#a89984"
