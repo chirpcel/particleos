@@ -11,8 +11,7 @@ The crucial difference that makes ParticleOS unique compared to other immutable
 distributions is that users build the ParticleOS image themselves and sign it
 with their own keys instead of installing vendor signed images. This allows
 configuring the image to your liking by having full control over which
-distribution is used as the base and which packages are installed into the
-image.
+packages are installed into the Arch Linux-based image.
 
 The ParticleOS image is built using [mkosi](https://github.com/systemd/mkosi).
 You will need to install the current main branch of mkosi to build current
@@ -33,10 +32,8 @@ Profiles=desktop,kde
 It is also strongly recommended to write a hashed root password prefixed with
 `hashed:` to `mkosi.rootpw` to allow debugging the system if something breaks.
 
-To build the image, run `mkosi -B -f` from the ParticleOS repository. Currently
-`arch`, `fedora` and `debian` are supported distributions. Implementing support for a
-new distribution (that's already supported in mkosi) is as simple as writing the
-necessary config files to install the required packages for that distribution.
+To build the image, run `mkosi -B -f` from the ParticleOS repository.
+Only Arch Linux (`Distribution=arch`) is supported.
 
 To update the system after installation, you clone the ParticleOS repository
 or your fork of it, make sure `mkosi.local.conf` is configured to your liking and
@@ -90,8 +87,7 @@ systemd-homed home must be unlocked to receive user outputs.
 The builder does **not** install packages on the ParticleOS host, change its
 Pacman database, or unlock `/usr`. To include a reviewed package in ParticleOS,
 use its output directory as a mkosi `VolatilePackageDirectories=` source, select
-the package in `Packages=`, and rebuild/sign/update the image. Arch packages are
-not interchangeable with Fedora or Debian packages.
+the package in `Packages=`, and rebuild/sign/update the image.
 
 AUR build files are executable, untrusted code. Review them before continuing.
 The guest uses a user namespace and private networking without mounting your
@@ -211,35 +207,6 @@ VerityKeySource=provider:pkcs11
 VerityCertificate=pkcs11:token=mkosi;id=%%02;type=cert
 VerityCertificateSource=provider:pkcs11
 ```
-
-## Prebuilt images
-
-ParticleOS images are built on the [Open Build Service](https://download.opensuse.org/repositories/system:/systemd/)
-and can be downloaded and installed. Currently x86-64 GNOME flavours of Fedora and
-Debian are provided and can be found in the respective "images" directory at the
-aforementioned link.
-
-The sources can be found in the `obs` branch of this repository, and the build
-configuration can be found in the [system:systemd project](https://build.opensuse.org/project/show/system:systemd)
-on OBS. These images will contain systemd built from latest git main, rather
-than what the respective distributions provide.
-
-Images built using the latest systemd stable branch, instead of main, are also
-provided, in the [system:systemd:stable project](https://build.opensuse.org/project/show/system:systemd:stable)
-project on OBS. The ParticleOS configuration is the same, the only difference is
-the systemd packages, which should be safer and more stable to use.
-
-The trust model of these images is as follows: any private key material used
-to sign the images is handled automatically and securely by OBS, and is not
-available to the project maintainers. The [OBS signing certificate](https://build.opensuse.org/projects/system:systemd/signing_keys)
-for the `system:systemd` project and the MSFT 3rd party 2011 and 2023 CAs
-are set up to be self-enrolled for UEFI secure boot if the system is booted
-in setup mode. The OBS PGP public key is enrolled in the `systemd-sysupdate`
-preinstalled keyring, and `sysupdate.d` configuration is preinstalled to
-automatically pull updates from OBS. The UKI is signed (both the image itself
-and the PCR policies contained within) with the OBS `system:systemd` project
-certificate as well. The dm-verity partitions are signed with the same key
-as well.
 
 ## Installation
 
