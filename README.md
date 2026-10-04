@@ -43,6 +43,62 @@ or your fork of it, make sure `mkosi.local.conf` is configured to your liking an
 run `mkosi -B -ff sysupdate -- update --reboot` which will update the system using
 `systemd-sysupdate` and then reboot.
 
+## Building AUR packages
+
+The opt-in `aur-builder` profile installs `particleos-aur`, which builds Arch
+User Repository packages in a separate, mutable Arch Linux systemd-nspawn
+container. Add `aur-builder` to your existing `Profiles=` selection in
+`mkosi.local.conf`, then rebuild and update your ParticleOS image as described
+above. The container is created on first use, not during the image build.
+
+Run the helper as your normal user:
+
+```sh
+particleos-aur <package>
+particleos-aur <package> --output /path/to/packages
+particleos-aur <package> --clean
+particleos-aur --reset
+```
+
+Administrative authorization is required for container provisioning and
+lifecycle operations. The helper fully updates the guest, fetches the selected
+AUR package base, and requires review before building. Build commands run as an
+unprivileged guest user; official build dependencies are installed only in the
+guest. Split packages are built together. Dependencies available only in the AUR
+are not resolved automatically: review and handle the reported missing dependency
+rather than assuming `makepkg` recursively builds AUR packages.
+
+The container is reused across invocations and normal host image updates;
+`--clean` requests a clean build and `--reset` removes the current user's builder
+so the next build provisions it again. Operations against the same builder are
+serialized. Guest roots live under
+`/var/lib/machines/particleos-aur-<uid>-<arch>/`; provisioning metadata lives under
+`/var/lib/particleos/aur-builder/`. These are administratively managed locations,
+not user-editable source checkouts.
+
+Successful packages, checksums, and build provenance are exported to a fresh
+directory under `${XDG_STATE_HOME:-$HOME/.local/state}/particleos/aur-builder/`
+unless `--output` is specified. Failed builds do not publish successful package
+outputs. Keep exported packages and logs you need backed up: factory reset can
+erase both builder state and home directories, and a systemd-homed home must be
+unlocked to receive user outputs.
+
+The builder does **not** install packages on the ParticleOS host, change its
+Pacman database, or unlock `/usr`. To include a reviewed package in ParticleOS,
+use its output directory as a mkosi `VolatilePackageDirectories=` source, select
+the package in `Packages=`, and rebuild/sign/update the image. Arch packages are
+not interchangeable with Fedora or Debian packages.
+
+AUR build files are executable, untrusted code. Review them before continuing.
+The guest uses a user namespace and private networking without mounting your
+home, SSH agent, signing keys, or host package database. Nevertheless, nspawn
+shares the host kernel and is not a VM-grade boundary against malicious builds;
+use a separate VM for packages you do not trust. The IPE-enforcing boot profile
+may prevent execution from the mutable guest filesystem; the helper must not
+disable host enforcement. Building requires Internet connectivity for Arch
+repositories and the AUR, plus working systemd-networkd/resolved container
+networking.
+
 ## Using the OBS profile to fetch a newer systemd
 
 Sometimes ParticleOS adopts systemd features as soon as they get merged into
