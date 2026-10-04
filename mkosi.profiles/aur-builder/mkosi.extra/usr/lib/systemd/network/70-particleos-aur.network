@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+[Match]
+Name=ve-paur*
+
+[Link]
+RequiredForOnline=no
+
+[Network]
+Address=0.0.0.0/28
+DHCPServer=yes
+IPMasquerade=ipv4
+IPv6AcceptRA=no
+
+[DHCPServer]
+DNS=1.1.1.1 9.9.9.9

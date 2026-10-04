@@ -71,17 +71,21 @@ rather than assuming `makepkg` recursively builds AUR packages.
 The container is reused across invocations and normal host image updates;
 `--clean` requests a clean build and `--reset` removes the current user's builder
 so the next build provisions it again. Operations against the same builder are
-serialized. Guest roots live under
-`/var/lib/machines/particleos-aur-<uid>-<arch>/`; provisioning metadata lives under
-`/var/lib/particleos/aur-builder/`. These are administratively managed locations,
-not user-editable source checkouts.
+serialized. Guest roots and provisioning metadata live under
+`/var/lib/particleos/aur-builder/<uid>-x86_64/`, in `rootfs/` and `complete.json`
+respectively. These are administratively managed locations, not user-editable
+source checkouts. Changes to the guest template require an explicit `--reset`.
+The initial implementation requires an x86_64 host, mkosi 26 or newer, and
+systemd 257 or newer.
 
 Successful packages, checksums, and build provenance are exported to a fresh
 directory under `${XDG_STATE_HOME:-$HOME/.local/state}/particleos/aur-builder/`
-unless `--output` is specified. Failed builds do not publish successful package
-outputs. Keep exported packages and logs you need backed up: factory reset can
-erase both builder state and home directories, and a systemd-homed home must be
-unlocked to receive user outputs.
+unless `--output` is specified. `--output` selects a parent directory; each build
+publishes a separate package-named directory there. Failed builds do not publish
+package outputs; their logs are saved under the default state directory's
+`failures/` subdirectory. Keep exported packages and logs you need backed up:
+factory reset can erase both builder state and home directories, and a
+systemd-homed home must be unlocked to receive user outputs.
 
 The builder does **not** install packages on the ParticleOS host, change its
 Pacman database, or unlock `/usr`. To include a reviewed package in ParticleOS,
@@ -96,8 +100,10 @@ shares the host kernel and is not a VM-grade boundary against malicious builds;
 use a separate VM for packages you do not trust. The IPE-enforcing boot profile
 may prevent execution from the mutable guest filesystem; the helper must not
 disable host enforcement. Building requires Internet connectivity for Arch
-repositories and the AUR, plus working systemd-networkd/resolved container
-networking.
+repositories and the AUR. The helper starts host systemd-networkd; the profile
+provides private-veth DHCP/NAT configuration, and the guest obtains its own DHCP
+lease. The default container DNS servers are 1.1.1.1 and 9.9.9.9; sites restricting
+external DNS should override the profile's network configuration.
 
 ## Using the OBS profile to fetch a newer systemd
 
