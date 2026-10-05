@@ -42,82 +42,40 @@ run `mkosi -B -ff sysupdate -- update --reboot` which will update the system usi
 
 ## Building AUR packages
 
-The opt-in `aur-builder` profile installs `particleos-aur` and
-[sdme](https://github.com/fiorix/sdme), which manages the separate, mutable Arch
-Linux systemd-nspawn container used to build Arch User Repository packages.
-Add `aur-builder` to your existing `Profiles=` selection in
-`mkosi.local.conf`. Before building, run `mise run prepare` from this repository
-to download the checksum-pinned native Arch sdme package into `mkosi.packages/`
-(requires mise, curl, and sha256sum on the build host). mkosi automatically uses
-that directory as a local package repository and installs `sdme` through Pacman
-when the profile is selected. Then rebuild and update your ParticleOS image as
-described above. The container is created on first use, not during the image
-build; no runtime installer modifies the host's `/usr` or Pacman database.
-
-Run the helper as your normal user:
+Configure the space-separated `AUR_PACKAGES` list in `mise.toml` with AUR package
+bases that produce a same-named package, then run:
 
 ```sh
-particleos-aur <package>
-particleos-aur <package> --output /path/to/packages
-particleos-aur <package> --clean
-particleos-aur --reset
+mise run prepare
+mkosi -B -f
 ```
 
-Administrative authorization is required for container provisioning and
-lifecycle operations. The helper fully updates the guest, fetches the selected
-AUR package base, and requires review before building. Build commands run as an
-unprivileged guest user; official build dependencies are installed only in the
-guest. Split packages are built together. Dependencies available only in the AUR
-are not resolved automatically: review and handle the reported missing dependency
-rather than assuming `makepkg` recursively builds AUR packages.
+`prepare` assumes `sdme` and `particleos-aur` are already installed on the build
+host; it does not bootstrap them. It downloads the checksum-pinned native Arch
+sdme package and builds the configured AUR packages into `mkosi.packages/`.
+It also selects those packages for installation in the image. mkosi uses its
+normal local-package repository and Pacman installation; there is no custom
+binary installer. The `aur-builder` profile includes sdme and the helper in
+subsequent images and is enabled by default; retain it if you override `Profiles=`
+in `mkosi.local.conf`. Preparation also requires curl, sha256sum, and Pacman for
+read-only package metadata queries. It never installs packages on the build host.
 
-The container is reused across invocations and normal host image updates;
-`--clean` requests a clean build and `--reset` removes the current user's builder
-so the next build provisions it again. Operations against the same builder are
-serialized. sdme imports the independent mkosi-built Arch root filesystem,
-creates a persistent writable container, and handles its user namespace,
-systemd service, and start/stop lifecycle. It does not clone the ParticleOS host.
-The helper uses a dedicated sdme configuration and shared data directory at
-`/var/lib/particleos/aur-builder/sdme/`; ParticleOS keeps per-user builder
-completion metadata alongside it under `/var/lib/particleos/aur-builder/`.
-These are administratively managed locations, not user-editable source
-checkouts. Changes to the guest template require an explicit `--reset`, including
-when migrating from the previous non-sdme builder. sdme also writes runtime
-service definitions under `/etc/systemd/system/`, which must remain writable.
-The initial implementation requires an x86_64 host, mkosi 26 or newer, and
-systemd 257 or newer. The sdme dependency is pinned to upstream release
-`v0.21.0` and verified against a checked-in SHA-256 digest by `mise run prepare`;
-update it by rebuilding the signed image, not by running `sdme upgrade` or the
-upstream runtime installer.
+For a single build, use `particleos-aur --output /path/to/packages PKGBASE`.
+Use `particleos-aur --reset` to remove your container and its imported base.
+The helper always uses a fresh checkout and asks for review before building.
 
-Successful packages, checksums, and build provenance are exported to a fresh
-directory under `${XDG_STATE_HOME:-$HOME/.local/state}/particleos/aur-builder/`
-unless `--output` is specified. `--output` selects a parent directory; each build
-publishes a separate package-named directory there. Failed builds do not publish
-package outputs; their logs are saved under the default state directory's
-`failures/` subdirectory. Keep exported packages and logs you need backed up:
-factory reset can erase both builder state and home directories, and a
-systemd-homed home must be unlocked to receive user outputs.
+`particleos-aur` uses [sdme](https://github.com/fiorix/sdme) to create or reuse an
+independent mutable Arch container, runs `makepkg` as an unprivileged guest user,
+and exports packages without installing anything on the host. Administrative
+authorization is needed for sdme operations. Dependencies available only in the
+AUR are not resolved automatically.
 
-The builder does **not** install packages on the ParticleOS host, change its
-Pacman database, or unlock `/usr`. To include a reviewed package in ParticleOS,
-use its output directory as a mkosi `VolatilePackageDirectories=` source, select
-the package in `Packages=`, and rebuild/sign/update the image.
-
-AUR build files are executable, untrusted code. Review them before continuing.
-The guest uses a user namespace and private networking without mounting your
-home, SSH agent, signing keys, or host package database. Nevertheless, nspawn
-shares the host kernel and is not a VM-grade boundary against malicious builds;
-use a separate VM for packages you do not trust. The IPE-enforcing boot profile
-may prevent execution from the mutable guest filesystem; the helper must not
-disable host enforcement. Building requires Internet connectivity for Arch
-repositories and the AUR. The helper starts host systemd-networkd; sdme boots the
-guest with private-veth networking and configures guest networkd/resolved. Host
-systemd-networkd's container-veth defaults provide DHCP/NAT; local network
-overrides must preserve guest connectivity and working DNS. Do not grant users
-unrestricted privileged access to sdme: `particleos-aur` limits operations to the
-authenticated user's builder and exports artifacts without privileged recursive
-copies.
+AUR recipes execute arbitrary code: review and trust the configured packages.
+Containers share the host kernel, so use a VM for untrusted recipes. `/usr`
+remains immutable; container state lives under `/var/lib/sdme/` and can be lost
+during factory reset. Internet access and working host networkd are required.
+IPE enforcement may prevent execution of mutable guest binaries; the builder
+never disables it.
 
 ## Using the OBS profile to fetch a newer systemd
 

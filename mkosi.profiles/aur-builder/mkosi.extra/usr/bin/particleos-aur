@@ -1,3 +1,123 @@
-#!/bin/sh
+#!/bin/bash
 # SPDX-License-Identifier: LGPL-2.1-or-later
-exec /usr/bin/python3 -I /usr/share/particleos/aur-builder/client.py "$@"
+# Guest scripts intentionally expand only inside the container.
+# shellcheck disable=SC2016
+set -euo pipefail
+umask 077
+die() { echo "particleos-aur: $*" >&2; exit 1; }
+[[ $(id -u) != 0 ]] || die "Run as an ordinary user; run0 authorizes sdme."
+# shellcheck source=/dev/null
+source /etc/os-release
+[[ $(uname -m) == x86_64 && ${ID:-} == arch ]] || die "Arch x86_64 required."
+[[ $(sdme --version) == 'sdme 0.21.0' ]] || die "sdme 0.21.0 required."
+output=${XDG_STATE_HOME:-$HOME/.local/state}/particleos/aur-builder/packages
+reset=false
+if [[ ${1:-} == --reset ]]; then
+    reset=true; shift
+elif [[ ${1:-} == --output ]]; then
+    [[ $# -ge 2 && -n $2 ]] || die "--output requires a directory."
+    output=$2; shift 2
+fi
+if $reset; then
+    [[ $# == 0 ]] || die "Usage: particleos-aur --reset"
+else
+    [[ $# == 1 && $1 =~ ^[a-z0-9][a-z0-9@._+-]{0,127}$ ]] ||
+        die "Usage: particleos-aur [--output DIR] PKGBASE"
+    package=$1
+fi
+machine=particleos-aur-$(id -u)-x86-64
+base=$machine-base
+state=${XDG_STATE_HOME:-$HOME/.local/state}/particleos/aur-builder
+mkdir -p -- "$state"
+exec 9>"$state/lock"
+flock -n 9 || die "Another build is running."
+# Administrative authority is run0's existing policy, not a custom root broker.
+sd() { run0 --pipe -- sdme "$@"; }
+guest() { sd exec "$machine" --user "$1" -- /bin/bash -euc "$2" -- "${@:3}"; }
+containers=$(sd ps --json)
+exists=false
+if grep -Eq "\"name\"[[:space:]]*:[[:space:]]*\"$machine\"" <<<"$containers"; then
+    exists=true
+fi
+if $reset; then
+    if $exists; then sd rm "$machine"; fi
+    filesystems=$(sd fs ls --json)
+    if grep -Eq "\"name\"[[:space:]]*:[[:space:]]*\"$base\"" <<<"$filesystems"; then
+        sd fs rm "$base"
+    fi
+    exit
+fi
+if ! $exists; then
+    filesystems=$(sd fs ls --json)
+    if ! grep -Eq "\"name\"[[:space:]]*:[[:space:]]*\"$base\"" <<<"$filesystems"; then
+        sd fs import docker.io/archlinux:base --name "$base" --install-packages=yes
+    fi
+    (umask 022; sd create --name "$machine" --fs "$base" --userns --hardened \
+        --network-veth --storage=overlay --masked-services= --restart=no)
+fi
+stage=
+cleanup() {
+    status=$?
+    trap - EXIT
+    sd stop "$machine" >&2 || status=1
+    [[ -z $stage ]] || rm -rf -- "$stage"
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+sd start "$machine"
+guest root '
+    pacman -Syu --needed --noconfirm base-devel git ca-certificates
+    id builder >/dev/null 2>&1 || useradd --create-home builder
+'
+mkdir -p -- "$output"
+stage=$(mktemp -d -- "$output/.build-XXXXXX")
+guest builder '
+    cd /home/builder
+    rm -rf build
+    git clone -- "https://aur.archlinux.org/$1.git" build >&2
+    cd build
+    git ls-files | while IFS= read -r file; do
+        printf "\n--- %s ---\n" "$file"
+        git show "HEAD:$file"
+    done
+' "$package" | LC_ALL=C sed -n l
+printf 'AUR code shares the host kernel. Build this revision? Type yes: ' >&2
+IFS= read -r answer
+[[ $answer == yes ]] || die "Build declined."
+# PKGBUILD evaluation is always unprivileged, including dependency discovery.
+guest builder 'cd /home/builder/build; makepkg --printsrcinfo' >"$stage/srcinfo"
+sed -n 's/^[[:space:]]*pkgname = //p' "$stage/srcinfo" >"$stage/names"
+grep -Fxq "$package" "$stage/names" ||
+    die "Package base must emit a same-named package."
+deps=()
+requirements=()
+while read -r kind requirement; do
+    [[ $requirement =~ ^([a-z0-9][a-z0-9@._+-]{0,127})((\>=|\<=|=|\>|\<)[A-Za-z0-9._+:~-]+)?$ ]] ||
+        die "Invalid dependency: $requirement"
+    dep=${BASH_REMATCH[1]}
+    if [[ $kind == depends ]] && grep -Fxq "$dep" "$stage/names"; then continue; fi
+    deps+=("$dep")
+    requirements+=("$requirement")
+done < <(sed -nE 's/^[[:space:]]*(depends|makedepends|checkdepends)(_x86_64)? = (.+)$/\1 \3/p' "$stage/srcinfo")
+if [[ ${#deps[@]} != 0 ]]; then
+    guest root 'pacman -S --needed --noconfirm -- "$@"' "${deps[@]}"
+    guest root 'pacman -T -- "$@"' "${requirements[@]}"
+fi
+# External constraints were checked above; sibling runtime packages build together.
+guest builder 'cd /home/builder/build; makepkg --nodeps --cleanbuild --clean --force --noconfirm' >&2
+guest builder 'find /home/builder/build -maxdepth 1 -type f -name "*.pkg.tar.*" -printf "%f\n"' >"$stage/files"
+[[ -s $stage/files ]] || die "No package artifacts."
+while IFS= read -r file; do
+    [[ $file =~ ^[A-Za-z0-9][A-Za-z0-9@._+:~-]*\.pkg\.tar\.(zst|xz|gz)$ ]] ||
+        die "Invalid artifact filename."
+    # No root host extraction/copy: bytes arrive through unprivileged guest cat.
+    guest builder '
+        file=/home/builder/build/$1
+        [[ -f $file && ! -L $file ]]
+        cat -- "$file"
+    ' "$file" >"$stage/$file"
+done <"$stage/files"
+while IFS= read -r file; do mv -T -- "$stage/$file" "$output/$file"; done <"$stage/files"
+echo "Packages saved to $output" >&2
