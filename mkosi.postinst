@@ -1,5 +1,13 @@
 #!/bin/bash
 # SPDX-License-Identifier: LGPL-2.1-or-later
+set -e
+
+# shellcheck source=/dev/null
+. "$BUILDROOT/usr/lib/os-release"
+if [[ $ID != arch ]]; then
+    echo "ParticleOS supports only Arch Linux images." >&2
+    exit 1
+fi
 
 rm -f "$BUILDROOT/usr/lib/tmpfiles.d/arch.conf"
 rm -f "$BUILDROOT/usr/lib/tmpfiles.d/audit.conf"

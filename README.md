@@ -11,8 +11,7 @@ The crucial difference that makes ParticleOS unique compared to other immutable
 distributions is that users build the ParticleOS image themselves and sign it
 with their own keys instead of installing vendor signed images. This allows
 configuring the image to your liking by having full control over which
-distribution is used as the base and which packages are installed into the
-image.
+packages are installed into the Arch Linux-based image.
 
 The ParticleOS image is built using [mkosi](https://github.com/systemd/mkosi).
 You will need to install the current main branch of mkosi to build current
@@ -33,15 +32,50 @@ Profiles=desktop,kde
 It is also strongly recommended to write a hashed root password prefixed with
 `hashed:` to `mkosi.rootpw` to allow debugging the system if something breaks.
 
-To build the image, run `mkosi -B -f` from the ParticleOS repository. Currently
-`arch`, `fedora` and `debian` are supported distributions. Implementing support for a
-new distribution (that's already supported in mkosi) is as simple as writing the
-necessary config files to install the required packages for that distribution.
+To build the image, run `mkosi -B -f` from the ParticleOS repository.
+Only Arch Linux (`Distribution=arch`) is supported.
 
 To update the system after installation, you clone the ParticleOS repository
 or your fork of it, make sure `mkosi.local.conf` is configured to your liking and
 run `mkosi -B -ff sysupdate -- update --reboot` which will update the system using
 `systemd-sysupdate` and then reboot.
+
+## Building AUR packages
+
+Configure the space-separated `AUR_PACKAGES` list in `mise.toml` with AUR package
+bases that produce a same-named package, then run:
+
+```sh
+mise run prepare
+mkosi -B -f
+```
+
+`prepare` assumes `sdme` and `particleos-aur` are already installed on the build
+host; it does not bootstrap them. It downloads the checksum-pinned native Arch
+sdme package and builds the configured AUR packages into `mkosi.packages/`.
+It also selects those packages for installation in the image. mkosi uses its
+normal local-package repository and Pacman installation; there is no custom
+binary installer. The `devel` profile includes sdme and the helper in
+subsequent images and is enabled by default; retain it if you override `Profiles=`
+in `mkosi.local.conf`. Preparation also requires curl, sha256sum, and Pacman for
+read-only package metadata queries. It never installs packages on the build host.
+
+For a single build, use `particleos-aur --output /path/to/packages PKGBASE`.
+Use `particleos-aur --reset` to remove your container and its imported base.
+The helper always uses a fresh checkout and asks for review before building.
+
+`particleos-aur` uses [sdme](https://github.com/fiorix/sdme) to create or reuse an
+independent mutable Arch container, runs `makepkg` as an unprivileged guest user,
+and exports packages without installing anything on the host. Administrative
+authorization is needed for sdme operations. Dependencies available only in the
+AUR are not resolved automatically.
+
+AUR recipes execute arbitrary code: review and trust the configured packages.
+Containers share the host kernel, so use a VM for untrusted recipes. `/usr`
+remains immutable; container state lives under `/var/lib/sdme/` and can be lost
+during factory reset. Internet access and working host networkd are required.
+IPE enforcement may prevent execution of mutable guest binaries; the builder
+never disables it.
 
 ## Using the OBS profile to fetch a newer systemd
 
@@ -149,35 +183,6 @@ VerityKeySource=provider:pkcs11
 VerityCertificate=pkcs11:token=mkosi;id=%%02;type=cert
 VerityCertificateSource=provider:pkcs11
 ```
-
-## Prebuilt images
-
-ParticleOS images are built on the [Open Build Service](https://download.opensuse.org/repositories/system:/systemd/)
-and can be downloaded and installed. Currently x86-64 GNOME flavours of Fedora and
-Debian are provided and can be found in the respective "images" directory at the
-aforementioned link.
-
-The sources can be found in the `obs` branch of this repository, and the build
-configuration can be found in the [system:systemd project](https://build.opensuse.org/project/show/system:systemd)
-on OBS. These images will contain systemd built from latest git main, rather
-than what the respective distributions provide.
-
-Images built using the latest systemd stable branch, instead of main, are also
-provided, in the [system:systemd:stable project](https://build.opensuse.org/project/show/system:systemd:stable)
-project on OBS. The ParticleOS configuration is the same, the only difference is
-the systemd packages, which should be safer and more stable to use.
-
-The trust model of these images is as follows: any private key material used
-to sign the images is handled automatically and securely by OBS, and is not
-available to the project maintainers. The [OBS signing certificate](https://build.opensuse.org/projects/system:systemd/signing_keys)
-for the `system:systemd` project and the MSFT 3rd party 2011 and 2023 CAs
-are set up to be self-enrolled for UEFI secure boot if the system is booted
-in setup mode. The OBS PGP public key is enrolled in the `systemd-sysupdate`
-preinstalled keyring, and `sysupdate.d` configuration is preinstalled to
-automatically pull updates from OBS. The UKI is signed (both the image itself
-and the PCR policies contained within) with the OBS `system:systemd` project
-certificate as well. The dm-verity partitions are signed with the same key
-as well.
 
 ## Installation
 

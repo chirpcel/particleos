@@ -3,6 +3,9 @@ mkosi.local/
 mkosi.local.conf
 mkosi.output/
 mkosi.cache/
+mkosi.packages/
+mkosi.conf.d/90-aur.conf
+.aur-prepare-*/
 mkosi.tools/
 mkosi.tools.manifest
 mkosi.key

@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+[env]
+# Whitespace-separated AUR package bases that emit a same-named package.
+AUR_PACKAGES = ""
+
+[tasks.prepare]
+description = "Stage sdme and build configured AUR packages for the Arch image"
+dir = "{{config_root}}"
+run = "bash scripts/prepare.sh"
