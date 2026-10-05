@@ -108,7 +108,8 @@ class BuilderTests(unittest.TestCase):
 
     def prepare(self, packages="", **env):
         run = tomllib.loads((ROOT / "mise.toml").read_text())["tasks"]["prepare"]["run"]
-        return subprocess.run(["bash", "-c", run], cwd=self.work,
+        self.assertEqual(run, "bash scripts/prepare.sh")
+        return subprocess.run(["bash", str(ROOT / "scripts/prepare.sh")], cwd=self.work,
                               env={**self.env, "AUR_PACKAGES": packages, **env},
                               capture_output=True, text=True)
 
