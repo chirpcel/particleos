@@ -21,7 +21,7 @@ else
     printf '%s  %s\n' "$checksum" "$package" | sha256sum --check --status
 fi
 
-printf '[Config]\nProfiles=aur-builder\n\n[Content]\n' >"$stage/90-aur.conf"
+printf '[Config]\nProfiles=devel\n\n[Content]\n' >"$stage/90-aur.conf"
 read -ra packages <<<"${AUR_PACKAGES//$'\n'/ }"
 
 for name in "${packages[@]}"; do

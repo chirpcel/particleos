@@ -15,7 +15,6 @@ die() {
 # shellcheck source=/dev/null
 source /etc/os-release
 [[ $(uname -m) == x86_64 && ${ID:-} == arch ]] || die "Arch x86_64 required."
-[[ $(sdme --version) == 'sdme 0.21.0' ]] || die "sdme 0.21.0 required."
 
 output=${XDG_STATE_HOME:-$HOME/.local/state}/particleos/aur-builder/packages
 reset=false

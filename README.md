@@ -55,7 +55,7 @@ host; it does not bootstrap them. It downloads the checksum-pinned native Arch
 sdme package and builds the configured AUR packages into `mkosi.packages/`.
 It also selects those packages for installation in the image. mkosi uses its
 normal local-package repository and Pacman installation; there is no custom
-binary installer. The `aur-builder` profile includes sdme and the helper in
+binary installer. The `devel` profile includes sdme and the helper in
 subsequent images and is enabled by default; retain it if you override `Profiles=`
 in `mkosi.local.conf`. Preparation also requires curl, sha256sum, and Pacman for
 read-only package metadata queries. It never installs packages on the build host.
