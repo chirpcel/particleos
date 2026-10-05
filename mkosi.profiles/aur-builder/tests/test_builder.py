@@ -11,6 +11,7 @@ import socket
 import struct
 import subprocess
 import tarfile
+import tomllib
 import unittest
 from unittest.mock import Mock, patch
 import uuid
@@ -477,14 +478,18 @@ class LifecycleTests(ScratchTest):
         self.assertEqual(command.call_args_list[1].args[0],
                          ["/usr/bin/pacman", "-Syu", "--noconfirm"])
 
-    def test_sdme_dependency_is_installed_only_at_image_build_with_checksum(self):
-        hook = PROFILE / "mkosi.postinst"
-        content = hook.read_text()
-        self.assertTrue(os.access(hook, os.X_OK))
-        self.assertIn("releases/download/v0.21.0/sdme-x86_64-linux", content)
-        self.assertIn("19e73b1c0a5f9498580952fe7fc6bcd10f002b39338f1ecfccc51c693cc88223", content)
+    def test_sdme_dependency_is_prepared_as_native_package(self):
+        repository = PROFILE.parents[1]
+        task = tomllib.loads((repository / "mise.toml").read_text())["tasks"]["prepare"]
+        content = task["run"]
+        self.assertEqual(task["dir"], "{{config_root}}")
+        self.assertFalse((PROFILE / "mkosi.postinst").exists())
+        self.assertIn("releases/download/v0.21.0/sdme-0.21.0-1-x86_64.pkg.tar.zst", content)
+        self.assertIn("d8b844cabf8a659b2061745e2ae1c6509308ab1a2f9405fc1c8e850ffddd0455", content)
         self.assertIn("sha256sum --check --status", content)
-        self.assertIn('"$BUILDROOT/usr/bin/sdme"', content)
+        self.assertIn('mv "$download" "$package"', content)
+        self.assertIn("mkosi.packages/", content)
+        self.assertIn("        sdme\n", (PROFILE / "mkosi.conf").read_text())
         self.assertNotIn("curl", (CODE / "lifecycle.py").read_text())
 
     def test_reset_rejects_paths_outside_state(self):

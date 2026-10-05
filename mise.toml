@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+[tasks.prepare]
+description = "Download the native sdme package for the Arch image"
+dir = "{{config_root}}"
+run = '''
+set -eu
+mkdir -p mkosi.packages
+package=mkosi.packages/sdme-0.21.0-1-x86_64.pkg.tar.zst
+checksum=d8b844cabf8a659b2061745e2ae1c6509308ab1a2f9405fc1c8e850ffddd0455
+if printf '%s  %s\n' "$checksum" "$package" | sha256sum --check --status 2>/dev/null; then
+    exit 0
+fi
+download=$(mktemp mkosi.packages/.sdme-XXXXXX)
+trap 'rm -f "$download"' EXIT
+curl --fail --location --proto '=https' --proto-redir '=https' \
+    --retry 3 --connect-timeout 30 --max-time 300 \
+    --output "$download" \
+    https://github.com/fiorix/sdme/releases/download/v0.21.0/sdme-0.21.0-1-x86_64.pkg.tar.zst
+printf '%s  %s\n' "$checksum" "$download" | sha256sum --check --status
+mv "$download" "$package"
+'''

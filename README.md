@@ -46,10 +46,13 @@ The opt-in `aur-builder` profile installs `particleos-aur` and
 [sdme](https://github.com/fiorix/sdme), which manages the separate, mutable Arch
 Linux systemd-nspawn container used to build Arch User Repository packages.
 Add `aur-builder` to your existing `Profiles=` selection in
-`mkosi.local.conf`, then rebuild and update your ParticleOS image as described
-above. The container is created on first use, not during the image build. sdme
-is included in the signed image; no runtime installer modifies the host's `/usr`
-or Pacman database.
+`mkosi.local.conf`. Before building, run `mise run prepare` from this repository
+to download the checksum-pinned native Arch sdme package into `mkosi.packages/`
+(requires mise, curl, and sha256sum on the build host). mkosi automatically uses
+that directory as a local package repository and installs `sdme` through Pacman
+when the profile is selected. Then rebuild and update your ParticleOS image as
+described above. The container is created on first use, not during the image
+build; no runtime installer modifies the host's `/usr` or Pacman database.
 
 Run the helper as your normal user:
 
@@ -83,7 +86,7 @@ when migrating from the previous non-sdme builder. sdme also writes runtime
 service definitions under `/etc/systemd/system/`, which must remain writable.
 The initial implementation requires an x86_64 host, mkosi 26 or newer, and
 systemd 257 or newer. The sdme dependency is pinned to upstream release
-`v0.21.0` and verified against a checked-in SHA-256 digest during image creation;
+`v0.21.0` and verified against a checked-in SHA-256 digest by `mise run prepare`;
 update it by rebuilding the signed image, not by running `sdme upgrade` or the
 upstream runtime installer.
 

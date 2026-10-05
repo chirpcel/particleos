@@ -3,6 +3,7 @@ mkosi.local/
 mkosi.local.conf
 mkosi.output/
 mkosi.cache/
+mkosi.packages/
 mkosi.tools/
 mkosi.tools.manifest
 mkosi.key
