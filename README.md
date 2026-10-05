@@ -42,11 +42,14 @@ run `mkosi -B -ff sysupdate -- update --reboot` which will update the system usi
 
 ## Building AUR packages
 
-The opt-in `aur-builder` profile installs `particleos-aur`, which builds Arch
-User Repository packages in a separate, mutable Arch Linux systemd-nspawn
-container. Add `aur-builder` to your existing `Profiles=` selection in
+The opt-in `aur-builder` profile installs `particleos-aur` and
+[sdme](https://github.com/fiorix/sdme), which manages the separate, mutable Arch
+Linux systemd-nspawn container used to build Arch User Repository packages.
+Add `aur-builder` to your existing `Profiles=` selection in
 `mkosi.local.conf`, then rebuild and update your ParticleOS image as described
-above. The container is created on first use, not during the image build.
+above. The container is created on first use, not during the image build. sdme
+is included in the signed image; no runtime installer modifies the host's `/usr`
+or Pacman database.
 
 Run the helper as your normal user:
 
@@ -68,12 +71,21 @@ rather than assuming `makepkg` recursively builds AUR packages.
 The container is reused across invocations and normal host image updates;
 `--clean` requests a clean build and `--reset` removes the current user's builder
 so the next build provisions it again. Operations against the same builder are
-serialized. Guest roots and provisioning metadata live under
-`/var/lib/particleos/aur-builder/<uid>-x86_64/`, in `rootfs/` and `complete.json`
-respectively. These are administratively managed locations, not user-editable
-source checkouts. Changes to the guest template require an explicit `--reset`.
+serialized. sdme imports the independent mkosi-built Arch root filesystem,
+creates a persistent writable container, and handles its user namespace,
+systemd service, and start/stop lifecycle. It does not clone the ParticleOS host.
+The helper uses a dedicated sdme configuration and shared data directory at
+`/var/lib/particleos/aur-builder/sdme/`; ParticleOS keeps per-user builder
+completion metadata alongside it under `/var/lib/particleos/aur-builder/`.
+These are administratively managed locations, not user-editable source
+checkouts. Changes to the guest template require an explicit `--reset`, including
+when migrating from the previous non-sdme builder. sdme also writes runtime
+service definitions under `/etc/systemd/system/`, which must remain writable.
 The initial implementation requires an x86_64 host, mkosi 26 or newer, and
-systemd 257 or newer.
+systemd 257 or newer. The sdme dependency is pinned to upstream release
+`v0.21.0` and verified against a checked-in SHA-256 digest during image creation;
+update it by rebuilding the signed image, not by running `sdme upgrade` or the
+upstream runtime installer.
 
 Successful packages, checksums, and build provenance are exported to a fresh
 directory under `${XDG_STATE_HOME:-$HOME/.local/state}/particleos/aur-builder/`
@@ -96,10 +108,13 @@ shares the host kernel and is not a VM-grade boundary against malicious builds;
 use a separate VM for packages you do not trust. The IPE-enforcing boot profile
 may prevent execution from the mutable guest filesystem; the helper must not
 disable host enforcement. Building requires Internet connectivity for Arch
-repositories and the AUR. The helper starts host systemd-networkd; the profile
-provides private-veth DHCP/NAT configuration, and the guest obtains its own DHCP
-lease. The default container DNS servers are 1.1.1.1 and 9.9.9.9; sites restricting
-external DNS should override the profile's network configuration.
+repositories and the AUR. The helper starts host systemd-networkd; sdme boots the
+guest with private-veth networking and configures guest networkd/resolved. Host
+systemd-networkd's container-veth defaults provide DHCP/NAT; local network
+overrides must preserve guest connectivity and working DNS. Do not grant users
+unrestricted privileged access to sdme: `particleos-aur` limits operations to the
+authenticated user's builder and exports artifacts without privileged recursive
+copies.
 
 ## Using the OBS profile to fetch a newer systemd
 

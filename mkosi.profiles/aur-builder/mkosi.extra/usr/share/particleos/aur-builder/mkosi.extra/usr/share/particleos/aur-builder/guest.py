@@ -222,11 +222,9 @@ def main():
         return
     if not args.package or not NAME.fullmatch(args.package):
         raise ValueError("Invalid package name")
-    # A standalone nspawn command does not boot networkd. Obtain a lease
-    # explicitly, using only the private veth and the profile's DHCP server.
-    Path("/etc/resolv.conf").unlink(missing_ok=True)
-    Path("/etc/resolv.conf").write_text("")
-    run(["/usr/bin/dhcpcd", "--waitip=4", "--timeout=60", "host0"])
+    # sdme boots the guest with networkd/resolved; wait for its private veth.
+    run(["/usr/lib/systemd/systemd-networkd-wait-online",
+         "--interface=host0", "--ipv4", "--timeout=60"])
     run(["/usr/bin/pacman", "-Syu", "--noconfirm"])
     base = rpc_package(args.package)
     if args.clean:

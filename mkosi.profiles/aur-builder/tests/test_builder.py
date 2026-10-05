@@ -9,6 +9,7 @@ from pathlib import Path
 import shutil
 import socket
 import struct
+import subprocess
 import tarfile
 import unittest
 from unittest.mock import Mock, patch
@@ -301,15 +302,190 @@ pkgname = example-libs
 
 
 class LifecycleTests(ScratchTest):
-    def test_nspawn_mapping_and_no_host_binds(self):
-        command = lifecycle.nspawn(Path("/state/rootfs"), "paur12345678", 655360)
-        for expected in ["--settings=no", "--private-users=655360:65536",
-                         "--private-users-ownership=off", "--network-veth", "--resolv-conf=off", "--as-pid2"]:
-            self.assertIn(expected, command)
-        self.assertFalse(any(value.startswith(("--bind", "--image", "--boot")) for value in command))
-        initial = lifecycle.nspawn(Path("/stage/rootfs"), "paur12345678", None, initialize=True)
-        self.assertIn("--private-users=pick", initial)
-        self.assertIn("--private-network", initial)
+    def test_sdme_exec_non_pty_and_explicit_guest_root(self):
+        command = lifecycle.guest_command("paur12345678", "example", "--clean")
+        self.assertEqual(command, [
+            "/usr/bin/sdme", "--config=" + str(lifecycle.SDME_CONFIG),
+            "exec", "paur12345678", "--user=root", "--",
+            "/usr/bin/python3", "-I", lifecycle.GUEST, "example", "--clean",
+        ])
+        self.assertFalse(any(value.startswith(("--bind", "--pty")) for value in command))
+
+    def test_control_stdout_cannot_pollute_export(self):
+        with patch.object(lifecycle.subprocess, "run") as command:
+            lifecycle.control("start", "paur12345678")
+        self.assertIs(command.call_args.kwargs["stdout"], lifecycle.sys.stderr)
+        self.assertIs(command.call_args.kwargs["stderr"], lifecycle.sys.stderr)
+        self.assertIs(command.call_args.kwargs["stdin"], subprocess.DEVNULL)
+        self.assertTrue(command.call_args.kwargs["check"])
+        self.assertNotIn("umask", command.call_args.kwargs)
+
+    def test_only_sdme_create_relaxes_child_umask(self):
+        with patch.object(lifecycle.subprocess, "run") as command:
+            lifecycle.control("create", "--name=paur12345678")
+            self.assertEqual(command.call_args.kwargs["umask"], 0o022)
+            for operation in ("fs", "start", "stop", "rm"):
+                lifecycle.control(operation, "paur12345678")
+                self.assertNotIn("umask", command.call_args.kwargs)
+
+    def test_sdme_imports_only_independent_guest_and_initializes(self):
+        target = self.scratch / "1000-x86_64"
+
+        def run_command(command, **kwargs):
+            if command[0] == "/usr/bin/mkosi":
+                pam = target / ".build/output/rootfs/etc/pam.d"
+                pam.mkdir(parents=True)
+                (pam / "login").write_text("trusted package PAM configuration")
+            return Mock(stdout="active\n")
+
+        with patch.object(lifecycle, "TEMPLATE", CODE), \
+                patch.object(lifecycle.subprocess, "run", side_effect=run_command) as run, \
+                patch.object(lifecycle, "control") as control:
+            data = lifecycle.create_builder(target, "paur12345678", "x86_64", "digest", Mock())
+        self.assertEqual(data, {"schema": 2, "architecture": "x86_64", "template": "digest"})
+        commands = [call.args for call in control.call_args_list]
+        self.assertEqual(commands[:3], [
+            ("fs", "import", str(target / ".build/output/rootfs"),
+             "--name=paur12345678-base", "--install-packages=no"),
+            ("create", "--name=paur12345678", "--fs=paur12345678-base",
+             "--userns", "--hardened", "--network-veth", "--storage=overlay", "--masked-services=", "--restart=no"),
+            ("start", "paur12345678"),
+        ])
+        self.assertEqual(commands[3], ("stop", "paur12345678"))
+        self.assertEqual(run.call_args_list[0].args[0][0], "/usr/bin/mkosi")
+        self.assertIn("--initialize", run.call_args_list[1].args[0])
+        self.assertFalse((target / ".build").exists())
+        self.assertFalse((target / "rootfs").exists())
+        self.assertEqual(json.loads((target / "complete.json").read_text()), data)
+
+    def test_missing_guest_pam_refuses_sdme_import_compatibility_hooks(self):
+        target = self.scratch / "1000-x86_64"
+        with patch.object(lifecycle, "TEMPLATE", CODE), \
+                patch.object(lifecycle.subprocess, "run"), \
+                patch.object(lifecycle, "control") as control, \
+                self.assertRaisesRegex(ValueError, "missing PAM login"):
+            lifecycle.create_builder(target, "paur12345678", "x86_64", "digest", Mock())
+        control.assert_not_called()
+        self.assertFalse((target / ".build").exists())
+        self.assertFalse((target / "complete.json").exists())
+
+    def test_stop_escalates_to_sdme_kill(self):
+        with patch.object(lifecycle.subprocess, "run", return_value=Mock(stdout="active\n")), \
+                patch.object(lifecycle, "control",
+                             side_effect=[subprocess.CalledProcessError(1, ["sdme"]), None]) as control:
+            lifecycle.stop_builder("paur12345678")
+        self.assertEqual([call.args for call in control.call_args_list],
+                         [("stop", "paur12345678"), ("stop", "--kill", "paur12345678")])
+
+    def test_stop_skips_inactive_guest(self):
+        for state in ("inactive", "failed"):
+            with self.subTest(state=state), \
+                    patch.object(lifecycle.subprocess, "run", return_value=Mock(stdout=state)), \
+                    patch.object(lifecycle, "control") as control:
+                lifecycle.stop_builder("paur12345678")
+            control.assert_not_called()
+
+    def test_reset_removes_sdme_container_before_imported_base(self):
+        target, state = self.scratch / "1000-x86_64", self.scratch / "sdme"
+        target.mkdir()
+        (state / "state").mkdir(parents=True)
+        (state / "state/paur12345678").touch()
+        (state / "fs/paur12345678-base").mkdir(parents=True)
+        with patch.object(lifecycle, "STATE", self.scratch), \
+                patch.object(lifecycle, "SDME_STATE", state), \
+                patch.object(lifecycle, "stop_builder") as stop, \
+                patch.object(lifecycle, "control") as control:
+            lifecycle.reset_builder(target, "paur12345678")
+        stop.assert_called_once_with("paur12345678")
+        self.assertEqual([call.args for call in control.call_args_list], [
+            ("rm", "--force", "paur12345678"),
+            ("fs", "rm", "--force", "paur12345678-base"),
+        ])
+        self.assertFalse(target.exists())
+
+    def run_broker(self, status=0, disconnect=False, start_failure=False):
+        peer = Mock()
+        peer.getsockopt.return_value = struct.pack("3i", 123, 1000, 1000)
+        peer.makefile.return_value = io.BytesIO(b'{"package":"example","clean":true,"reset":false}\n')
+        target = self.scratch / "1000-x86_64"
+        target.mkdir()
+        data = {"schema": 2, "architecture": "x86_64", "template": "digest"}
+        process = Mock(returncode=status)
+        process.poll.side_effect = [None, status, status] if not disconnect else [None, None]
+        poller = Mock()
+        poller.poll.return_value = [(123, 1)] if disconnect else []
+        with patch.object(lifecycle, "STATE", self.scratch), \
+                patch.object(lifecycle, "lock", side_effect=lambda path: contextlib.nullcontext()), \
+                patch.object(lifecycle, "trusted_directory"), \
+                patch.object(lifecycle.pwd, "getpwuid"), \
+                patch.object(lifecycle.platform, "machine", return_value="x86_64"), \
+                patch.object(lifecycle, "preflight"), \
+                patch.object(lifecycle, "template_digest", return_value="digest"), \
+                patch.object(lifecycle, "metadata", return_value=data), \
+                patch.object(lifecycle, "stop_builder") as stop, \
+                patch.object(lifecycle, "control",
+                             side_effect=subprocess.CalledProcessError(1, ["sdme"])
+                             if start_failure else None), \
+                patch.object(lifecycle.subprocess, "Popen", return_value=process) as spawn, \
+                patch.object(lifecycle.select, "poll", return_value=poller):
+            if disconnect:
+                with self.assertRaisesRegex(ValueError, "disconnected"):
+                    lifecycle.serve(peer)
+            elif start_failure:
+                with self.assertRaises(subprocess.CalledProcessError):
+                    lifecycle.serve(peer)
+            else:
+                self.assertEqual(lifecycle.serve(peer), status)
+        self.assertEqual(stop.call_count, 2)
+        if not start_failure:
+            self.assertIs(spawn.call_args.kwargs["stdout"], peer)
+            self.assertIs(spawn.call_args.kwargs["stdin"], peer)
+            self.assertIs(spawn.call_args.kwargs["stderr"], lifecycle.sys.stderr)
+            self.assertIn("--clean", spawn.call_args.args[0])
+        if disconnect:
+            process.terminate.assert_called_once()
+            process.wait.assert_called_once_with(timeout=15)
+        if start_failure:
+            spawn.assert_not_called()
+
+    def test_broker_preserves_sdme_exec_return_codes(self):
+        for status in (0, 42):
+            with self.subTest(status=status):
+                self.run_broker(status)
+                shutil.rmtree(self.scratch / "1000-x86_64")
+
+    def test_broker_disconnect_stops_guest(self):
+        self.run_broker(disconnect=True)
+
+    def test_broker_start_failure_stops_guest(self):
+        self.run_broker(start_failure=True)
+
+    def test_sdme_version_is_pinned(self):
+        with patch.object(client.subprocess, "run", return_value=Mock(stdout="sdme 0.20.0\n")), \
+                self.assertRaisesRegex(ValueError, "sdme 0.21.0"):
+            client.check_sdme_version()
+
+    def test_guest_uses_booted_networking_not_manual_dhcpcd(self):
+        with patch.object(guest.sys, "argv", ["guest.py", "example"]), \
+                patch.object(guest.os, "getuid", return_value=0), \
+                patch.object(guest, "rpc_package", side_effect=ValueError("offline")), \
+                patch.object(guest, "run") as command, self.assertRaisesRegex(ValueError, "offline"):
+            guest.main()
+        self.assertEqual(command.call_args_list[0].args[0], [
+            "/usr/lib/systemd/systemd-networkd-wait-online", "--interface=host0", "--ipv4", "--timeout=60",
+        ])
+        self.assertEqual(command.call_args_list[1].args[0],
+                         ["/usr/bin/pacman", "-Syu", "--noconfirm"])
+
+    def test_sdme_dependency_is_installed_only_at_image_build_with_checksum(self):
+        hook = PROFILE / "mkosi.postinst"
+        content = hook.read_text()
+        self.assertTrue(os.access(hook, os.X_OK))
+        self.assertIn("releases/download/v0.21.0/sdme-x86_64-linux", content)
+        self.assertIn("19e73b1c0a5f9498580952fe7fc6bcd10f002b39338f1ecfccc51c693cc88223", content)
+        self.assertIn("sha256sum --check --status", content)
+        self.assertIn('"$BUILDROOT/usr/bin/sdme"', content)
+        self.assertNotIn("curl", (CODE / "lifecycle.py").read_text())
 
     def test_reset_rejects_paths_outside_state(self):
         with patch.object(lifecycle, "STATE", self.scratch):
@@ -386,14 +562,14 @@ class LifecycleTests(ScratchTest):
                 self.assertRaisesRegex(ValueError, "Required host tool missing"):
             client.preflight()
 
-    def test_reset_preflight_does_not_require_build_tools_python_or_ipe(self):
+    def test_reset_preflight_requires_only_run0_and_pinned_sdme(self):
         with patch.object(client.Path, "is_file", return_value=True), \
                 patch.object(client.platform, "machine", return_value="x86_64"), \
                 patch.object(client.sys, "version_info", (3, 10)), \
                 patch.object(client.Path, "exists", side_effect=AssertionError("IPE must not be checked")), \
-                patch.object(client.subprocess, "run") as command:
+                patch.object(client.subprocess, "run", return_value=Mock(stdout="sdme 0.21.0\n")) as command:
             client.preflight(reset=True)
-        command.assert_not_called()
+        self.assertEqual(command.call_args.args[0], ["/usr/bin/sdme", "--version"])
 
     def test_preflight_rejects_old_python(self):
         with patch.object(client.Path, "is_file", return_value=True), \
@@ -420,7 +596,8 @@ class LifecycleTests(ScratchTest):
         command.assert_not_called()
 
     def test_preflight_accepts_compatible_versions(self):
-        versions = [Mock(stdout="systemd 257\n"), Mock(stdout="mkosi 26\n"), Mock(stdout="systemd 257\n")]
+        versions = [Mock(stdout="systemd 257\n"), Mock(stdout="mkosi 26\n"),
+                    Mock(stdout="systemd 257\n"), Mock(stdout="sdme 0.21.0\n")]
         with patch.object(client.Path, "is_file", return_value=True), \
                 patch.object(client.Path, "exists", return_value=False), \
                 patch.object(client.platform, "machine", return_value="x86_64"), \

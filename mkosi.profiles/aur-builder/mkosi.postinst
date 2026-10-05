@@ -1,0 +1,17 @@
+#!/bin/bash
+# SPDX-License-Identifier: LGPL-2.1-or-later
+set -euo pipefail
+
+[[ $DISTRIBUTION == arch && $DISTRIBUTION_ARCHITECTURE == x86_64 ]]
+
+# Install only while constructing the image; /usr is immutable at runtime.
+binary="$BUILDROOT/usr/bin/.sdme-download"
+trap 'rm -f "$binary"' EXIT
+curl --fail --location --proto '=https' --proto-redir '=https' \
+    --retry 3 --connect-timeout 30 --max-time 300 \
+    --output "$binary" \
+    https://github.com/fiorix/sdme/releases/download/v0.21.0/sdme-x86_64-linux
+printf '%s  %s\n' \
+    19e73b1c0a5f9498580952fe7fc6bcd10f002b39338f1ecfccc51c693cc88223 \
+    "$binary" | sha256sum --check --status
+install --mode=0755 "$binary" "$BUILDROOT/usr/bin/sdme"

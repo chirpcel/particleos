@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 """Root-only lifecycle broker; never reads or copies guest build artifacts."""
 import fcntl
-import grp
 import hashlib
 import json
 import os
@@ -11,6 +10,7 @@ import pwd
 import re
 import select
 import shutil
+import signal
 import socket
 import stat
 import struct
@@ -21,6 +21,8 @@ import uuid
 TEMPLATE = Path("/usr/share/particleos/aur-builder")
 STATE = Path("/var/lib/particleos/aur-builder")
 RUNTIME = Path("/run/particleos-aur")
+SDME_STATE = STATE / "sdme"
+SDME_CONFIG = TEMPLATE / "sdme.conf"
 ENV = {"PATH": "/usr/bin", "HOME": "/root", "LANG": "C.UTF-8"}
 NAME = re.compile(r"[a-z0-9][a-z0-9@._+-]{0,127}\Z")
 GUEST = "/usr/share/particleos/aur-builder/guest.py"
@@ -61,7 +63,8 @@ def remove_tree(path):
 
 def template_digest():
     digest = hashlib.sha256()
-    files = [TEMPLATE / "mkosi.conf", *(TEMPLATE / "mkosi.extra").rglob("*")]
+    files = [TEMPLATE / "mkosi.conf", TEMPLATE / "sdme.conf",
+             *(TEMPLATE / "mkosi.extra").rglob("*")]
     for path in sorted(files):
         if path.is_file():
             digest.update(str(path.relative_to(TEMPLATE)).encode())
@@ -71,63 +74,61 @@ def template_digest():
 
 def metadata(path):
     file = path / "complete.json"
+    if not file.exists():
+        raise ValueError("Incomplete builder; run particleos-aur --reset")
     info = file.lstat()
     if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
         raise ValueError("Unsafe builder completion metadata; use --reset")
     data = json.loads(file.read_text())
     if not isinstance(data, dict):
         raise ValueError("Invalid completion metadata; use --reset")
-    shift = data.get("shift")
-    if not isinstance(shift, int) or not 524288 <= shift <= 1878982656 or shift % 65536:
-        raise ValueError("Invalid user namespace mapping; use --reset")
-    root = (path / "rootfs").lstat()
-    if not stat.S_ISDIR(root.st_mode) or root.st_uid != shift or root.st_gid != shift:
-        raise ValueError("Builder root ownership does not match its reserved mapping; use --reset")
     return data
 
 
-def range_available(shift, own=None):
-    end = shift + 65536
-    if any(shift <= p.pw_uid < end for p in pwd.getpwall()):
-        return False
-    if any(shift <= g.gr_gid < end for g in grp.getgrall()):
-        return False
-    for file in (Path("/etc/subuid"), Path("/etc/subgid")):
-        if file.exists():
-            for line in file.read_text().splitlines():
-                if not line or line.startswith("#"):
-                    continue
-                _, start, count = line.split(":")
-                start, count = int(start), int(count)
-                if start < end and start + count > shift:
-                    return False
-    for entry in STATE.iterdir():
-        if entry.is_dir() and not entry.name.startswith(".") and entry != own:
-            if not (entry / "complete.json").exists():
-                raise ValueError(f"Incomplete builder {entry.name}; reset it before creating another")
-            other = metadata(entry)["shift"]
-            if other < end and other + 65536 > shift:
-                return False
-    return True
+def sdme(*arguments):
+    return ["/usr/bin/sdme", "--config=" + str(SDME_CONFIG), *arguments]
 
 
-def nspawn(root, machine, shift, initialize=False):
-    options = [
-        "/usr/bin/systemd-nspawn", "--quiet", "--settings=no",
-        "--directory=" + str(root), "--machine=" + machine,
-        "--register=no", "--keep-unit", "--console=pipe", "--as-pid2",
-        "--private-users=" + ("pick" if initialize else f"{shift}:65536"),
-        "--private-users-ownership=" + ("chown" if initialize else "off"),
-        "--resolv-conf=off", "--link-journal=no",
-        "--timezone=off", "--setenv=HOME=/build",
-        "--setenv=PATH=/usr/bin", "--setenv=LANG=C.UTF-8",
-    ]
-    options += ["--private-network"] if initialize else ["--network-veth"]
-    return [*options, "/usr/bin/python3", "-I", GUEST]
+def control(*arguments):
+    # Only create needs guest traversal permissions; all other work retains 077.
+    options = {"umask": 0o022} if arguments[0] == "create" else {}
+    return subprocess.run(sdme(*arguments), env=ENV, stdin=subprocess.DEVNULL,
+                          stdout=sys.stderr, stderr=sys.stderr, check=True, **options)
 
 
-def create_builder(target, architecture, fingerprint, peer):
-    stage = STATE / (".stage-" + uuid.uuid4().hex)
+def guest_command(machine, *arguments):
+    # v0.21.0 exec uses systemd-run --quiet --pipe --wait and preserves its status.
+    # Unlike join, it never allocates a PTY; keep stderr away from the tar stream.
+    return sdme("exec", machine, "--user=root", "--",
+                "/usr/bin/python3", "-I", GUEST, *arguments)
+
+
+def stop_builder(machine):
+    result = subprocess.run(
+        ["/usr/bin/systemctl", "show", "--property=ActiveState", "--value",
+         "sdme@" + machine + ".service"],
+        env=ENV, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=sys.stderr, text=True, check=True,
+    )
+    if result.stdout.strip() not in ("inactive", "failed"):
+        try:
+            control("stop", machine)
+        except subprocess.CalledProcessError:
+            control("stop", "--kill", machine)
+
+
+def reset_builder(target, machine):
+    if (SDME_STATE / "state" / machine).exists():
+        stop_builder(machine)
+        control("rm", "--force", machine)
+    if (SDME_STATE / "fs" / (machine + "-base")).exists():
+        control("fs", "rm", "--force", machine + "-base")
+    remove_tree(target)
+
+
+def create_builder(target, machine, architecture, fingerprint, peer):
+    target.mkdir(mode=0o700)
+    stage = target / ".build"
     stage.mkdir(mode=0o700)
     try:
         project = stage / "project"
@@ -146,42 +147,25 @@ def create_builder(target, architecture, fingerprint, peer):
             cwd=project, env=ENV, stdin=subprocess.DEVNULL, stdout=sys.stderr, check=True,
         )
         root = stage / "output/rootfs"
-        # Reserve a namespace before untrusted code ever runs. The global lock
-        # serializes reservations for inactive as well as active builders.
-        for _ in range(8):
-            machine = "paur" + uuid.uuid4().hex[:8]
-            subprocess.run(
-                nspawn(root, machine, None, initialize=True) + ["--initialize"],
-                env=ENV, stdin=subprocess.DEVNULL, stdout=sys.stderr, check=True,
-            )
-            ownership = root.lstat()
-            shift = ownership.st_uid
-            if (524288 <= shift <= 1878982656 and shift % 65536 == 0 and
-                    ownership.st_gid == shift and range_available(shift)):
-                break
-            # pick reuses the existing ownership; move it back to zero before
-            # retrying with a new machine name. This is still a pristine tree.
-            subprocess.run(
-                ["/usr/bin/systemd-nspawn", "--quiet", "--settings=no",
-                 "--directory=" + str(root), "--private-users=0:65536",
-                 "--private-users-ownership=chown", "--private-network",
-                 "--register=no", "--keep-unit", "--console=pipe",
-                 "/usr/bin/true"],
-                env=ENV, stdin=subprocess.DEVNULL, stdout=sys.stderr, check=True,
-            )
-        else:
-            raise ValueError("Unable to reserve a nonoverlapping user namespace")
-        root.rename(stage / "rootfs")
-        for name in ("project", "output", "workspace", "cache", "packages"):
-            shutil.rmtree(stage / name)
-        data = {"schema": 1, "architecture": architecture, "shift": shift,
+        if not (root / "etc/pam.d/login").is_file():
+            raise ValueError("Independent Arch rootfs is missing PAM login; refusing import hooks")
+        control("fs", "import", str(root),
+                "--name=" + machine + "-base", "--install-packages=no")
+        control("create", "--name=" + machine, "--fs=" + machine + "-base",
+                "--userns", "--hardened", "--network-veth", "--storage=overlay",
+                "--masked-services=", "--restart=no")
+        try:
+            control("start", machine)
+            subprocess.run(guest_command(machine, "--initialize"), env=ENV,
+                           stdin=subprocess.DEVNULL, stdout=sys.stderr, stderr=sys.stderr, check=True)
+        finally:
+            stop_builder(machine)
+        data = {"schema": 2, "architecture": architecture,
                 "template": fingerprint}
-        (stage / "complete.json").write_text(json.dumps(data) + "\n")
-        stage.rename(target)
+        (target / "complete.json").write_text(json.dumps(data) + "\n")
         return data
     finally:
-        if stage.exists():
-            remove_tree(stage)
+        shutil.rmtree(stage)
 
 
 def preflight():
@@ -192,9 +176,15 @@ def preflight():
     if enforce.exists() and enforce.read_text().strip() != "0":
         raise ValueError("IPE enforcement is active: unsigned guest executables may be denied. "
                          "An administrator must provide a suitable IPE policy; this helper never disables IPE.")
-    for program in ("run0", "mkosi", "systemd-nspawn"):
+    for program in ("run0", "mkosi", "sdme", "systemd-nspawn"):
         if not Path("/usr/bin", program).exists():
             raise ValueError(f"Required host tool missing: {program}")
+    version = subprocess.run(
+        ["/usr/bin/sdme", "--version"], env=ENV, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=sys.stderr, text=True, check=True,
+    )
+    if version.stdout.strip() != "sdme 0.21.0":
+        raise ValueError("This builder requires sdme 0.21.0")
     subprocess.run(["/usr/bin/systemctl", "start", "systemd-networkd.service"],
                    env=ENV, stdin=subprocess.DEVNULL, stdout=sys.stderr, check=True)
 
@@ -224,48 +214,51 @@ def serve(peer):
     for path in (Path("/var/lib/particleos"), STATE):
         trusted_directory(path)
     target = STATE / f"{uid}-{architecture}"
+    machine = "paur" + hashlib.sha256(target.name.encode()).hexdigest()[:16]
     with lock(STATE / f".{uid}-{architecture}.lock"):
         if request["reset"]:
-            with lock(STATE / ".allocation.lock"):
-                remove_tree(target)
+            reset_builder(target, machine)
             peer.sendall(b'{"type":"reset"}\n')
             return 0
         preflight()
         fingerprint = template_digest()
-        with lock(STATE / ".allocation.lock"):
-            # A killed initial build cannot be reused as a complete builder.
-            for stage in STATE.glob(".stage-*"):
-                remove_tree(stage)
-            if target.exists():
-                data = metadata(target)
-            else:
-                data = create_builder(target, architecture, fingerprint, peer)
-            if (data.get("schema") != 1 or data.get("architecture") != architecture or
-                    data.get("template") != fingerprint):
-                raise ValueError("Builder template changed; run particleos-aur --reset")
-            if not range_available(data["shift"], own=target):
-                raise ValueError("Reserved namespace now overlaps a host allocation; use --reset")
-        machine = "paur" + hashlib.sha256(target.name.encode()).hexdigest()[:8]
-        command = nspawn(target / "rootfs", machine, data["shift"]) + [package]
+        trusted_directory(SDME_STATE)
+        if target.exists():
+            trusted_directory(target)
+            data = metadata(target)
+        else:
+            data = create_builder(target, machine, architecture, fingerprint, peer)
+        if (data.get("schema") != 2 or data.get("architecture") != architecture or
+                data.get("template") != fingerprint):
+            raise ValueError("Builder template changed; run particleos-aur --reset")
+        command = guest_command(machine, package)
         if request["clean"]:
             command.append("--clean")
         peer.settimeout(None)
-        process = subprocess.Popen(command, env=ENV, stdin=peer, stdout=peer, stderr=sys.stderr)
-        poller = select.poll()
-        poller.register(peer, select.POLLHUP | select.POLLERR | select.POLLRDHUP)
+        process = None
         try:
+            stop_builder(machine)
+            control("start", machine)
+            process = subprocess.Popen(command, env=ENV, stdin=peer, stdout=peer, stderr=sys.stderr)
+            poller = select.poll()
+            poller.register(peer, select.POLLHUP | select.POLLERR | select.POLLRDHUP)
             while process.poll() is None:
                 if poller.poll(500):
                     raise ValueError("Client disconnected; stopping its builder")
             return process.returncode
         finally:
-            if process.poll() is None:
+            if process is not None and process.poll() is None:
                 process.terminate()
                 try:
                     process.wait(timeout=15)
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
+            stop_builder(machine)
+
+
+def interrupted(signum, frame):
+    raise KeyboardInterrupt
 
 
 def main():
@@ -274,6 +267,7 @@ def main():
     os.umask(0o077)
     os.environ.clear()
     os.environ.update(ENV)
+    signal.signal(signal.SIGTERM, interrupted)
     trusted_directory(RUNTIME, 0o711)
     address = RUNTIME / (uuid.uuid4().hex + ".sock")
     with socket.socket(socket.AF_UNIX) as listener:

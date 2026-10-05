@@ -35,14 +35,15 @@ def state_directory():
 def preflight(reset=False):
     if platform.machine() != "x86_64":
         raise ValueError("This Arch Linux builder currently supports x86_64 hosts only")
-    programs = ("run0",) if reset else ("run0", "mkosi", "systemd-nspawn")
+    programs = ("run0", "sdme") if reset else ("run0", "mkosi", "systemd-nspawn", "sdme")
     for program in programs:
         if not Path("/usr/bin", program).is_file():
             raise ValueError(f"Required host tool missing: {program}")
-    if reset:
-        return
-    if sys.version_info < (3, 11):
+    if not reset and sys.version_info < (3, 11):
         raise ValueError("Building requires Python >=3.11")
+    if reset:
+        check_sdme_version()
+        return
     enforce, lsm = Path("/sys/kernel/security/ipe/enforce"), Path("/sys/kernel/security/lsm")
     if lsm.exists() and "ipe" in lsm.read_text().strip().split(",") and not enforce.exists():
         raise ValueError("Cannot determine IPE enforcement state; administrator action is required")
@@ -50,6 +51,9 @@ def preflight(reset=False):
         raise ValueError("IPE enforcement is active; an administrator must provide a suitable policy "
                          "for unsigned guest executables. This tool never disables IPE.")
     for program in programs:
+        if program == "sdme":
+            check_sdme_version()
+            continue
         minimum, label = (26, "mkosi") if program == "mkosi" else (257, "systemd")
         try:
             result = subprocess.run(
@@ -63,6 +67,19 @@ def preflight(reset=False):
         if (not version or int(version[1]) < minimum or
                 (int(version[1]) == minimum and version[2].startswith("~"))):
             raise ValueError(f"{program} requires {label} >={minimum}")
+
+
+def check_sdme_version():
+    try:
+        result = subprocess.run(
+            ["/usr/bin/sdme", "--version"], check=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env={"PATH": "/usr/bin", "LANG": "C.UTF-8"},
+        )
+    except subprocess.CalledProcessError as error:
+        raise ValueError("Cannot determine sdme version") from error
+    if result.stdout.strip() != "sdme 0.21.0":
+        raise ValueError("This builder requires sdme 0.21.0")
 
 
 def receive_archive(stream, destination):
@@ -165,7 +182,7 @@ def main(argv=None):
                     destination = args.output / (".partial-" + uuid.uuid4().hex)
                     destination.mkdir(mode=0o700)
                     names = receive_archive(stream, destination)
-                    # Drain tar padding until EOF; success also requires run0/nspawn exit 0.
+                    # Drain tar padding until EOF; success also requires run0/sdme exit 0.
                     while stream.read(65536):
                         pass
                     break
@@ -214,8 +231,7 @@ def main(argv=None):
         if destination is not None:
             shutil.rmtree(destination)
         if process.poll() is None:
-            # Closing the socket terminates the guest protocol; run0's service
-            # lifetime owns nspawn, so do not publish an interrupted export.
+            # Closing the socket makes the lifecycle broker stop the sdme guest.
             process.terminate()
             process.wait()
         process.stdout.close()
