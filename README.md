@@ -17,16 +17,18 @@ The ParticleOS image is built using [mkosi](https://github.com/systemd/mkosi).
 You will need to install the current main branch of mkosi to build current
 ParticleOS images.
 
-First, configure the variant you'd like to build in `mkosi.local.conf`. For a
-desktop system, you'll want the `desktop` and one of `gnome`, `kde`, or
-`sway` profiles.
+The default configuration enables the `intel`, `laptop`, `desktop`, and
+`devel` profiles. Available profiles are `desktop`, `devel`, `intel`, and
+`laptop`; the desktop profile provides a Sway session. To select a different
+set of profiles, configure them in `mkosi.local.conf`. For example, to build
+the desktop profile without the other defaults:
 
 ```conf
 [Distribution]
 Distribution=arch
 
 [Config]
-Profiles=desktop,kde
+Profiles=desktop
 ```
 
 It is also strongly recommended to write a hashed root password prefixed with
@@ -43,22 +45,22 @@ run `mkosi -B -ff sysupdate -- update --reboot` which will update the system usi
 ## Building AUR packages
 
 Configure the space-separated `AUR_PACKAGES` list in `mise.toml` with AUR package
-bases that produce a same-named package, then run:
+bases that produce a same-named package. Make `particleos-aur` available on the
+build host; it uses `sdme` and `run0` to build packages in an isolated Arch
+container. The host also needs `curl`, `sha256sum`, and Pacman. Then run:
 
 ```sh
 mise run prepare
 mkosi -B -f
 ```
 
-`prepare` assumes `sdme` and `particleos-aur` are already installed on the build
-host; it does not bootstrap them. It downloads the checksum-pinned native Arch
-sdme package and builds the configured AUR packages into `mkosi.packages/`.
-It also selects those packages for installation in the image. mkosi uses its
+`prepare` downloads a checksum-pinned native Arch `sdme` package and builds the
+configured AUR packages into `mkosi.packages/`. It generates a mkosi drop-in to
+select those packages for installation and enable the `devel` profile, which
+includes `sdme` and the `particleos-aur` helper in the image. mkosi uses its
 normal local-package repository and Pacman installation; there is no custom
-binary installer. The `devel` profile includes sdme and the helper in
-subsequent images and is enabled by default; retain it if you override `Profiles=`
-in `mkosi.local.conf`. Preparation also requires curl, sha256sum, and Pacman for
-read-only package metadata queries. It never installs packages on the build host.
+binary installer. Preparation only queries package metadata on the build host;
+it does not install packages there.
 
 For a single build, use `particleos-aur --output /path/to/packages PKGBASE`.
 Use `particleos-aur --reset` to remove your container and its imported base.
@@ -77,35 +79,9 @@ during factory reset. Internet access and working host networkd are required.
 IPE enforcement may prevent execution of mutable guest binaries; the builder
 never disables it.
 
-## Using the OBS profile to fetch a newer systemd
-
-Sometimes ParticleOS adopts systemd features as soon as they get merged into
-systemd without waiting for an official release. That's why we recommend
-enabling the `obs-repos` profile to enable the systemd repositories on OBS
-(https://software.opensuse.org//download.html?project=system%3Asystemd&package=systemd)
-containing systemd packages which are built every day from systemd's git main
-branch.
-
-To enable the `obs-repos` profile, add the following to `mkosi.local.conf`:
-
-```conf
-[Config]
-Profiles=obs-repos
-```
-
-We also provide the `obs-repos-stable` profile, that will use the latest stable
-branch of systemd, instead of main, providing more stability and less risk, as
-it is what distributions typically use. To enable this profile, add the
-following to `mkosi.local.conf`:
-
-```conf
-[Config]
-Profiles=obs-repos-stable
-```
-
 ## Building systemd from source
 
-As an alternative to using the `obs-repos` profile, you can build systemd from source:
+You can build systemd from source and use its artifacts in ParticleOS:
 
 ```sh
 git clone https://github.com/systemd/systemd
@@ -134,10 +110,15 @@ To build a newer systemd, run `git pull` in the systemd repository followed by
 
 ## Signing keys
 
-ParticleOS images are signed for Secure Boot with the user's keys. To generate a new key,
-run `mkosi genkey`. The key must be stored safely, it will be required to sign updates.
+ParticleOS images are signed for Secure Boot, PCR measurements, and usr-verity
+with the user's keys. The checked-in `mkosi.conf` expects a PKCS#11 token named
+`Database Key` with a private key and certificate at ID `02`. Make that token
+available when building, or override the signing key and certificate settings
+in `mkosi.local.conf`. Keep the private key safe; it is required to sign updates.
 
-The key can be stored in a smartcard. Then you have to set the key in `mkosi.local.conf`:
+To use a different key, generate key material with `mkosi genkey` or store it in
+a smartcard, then configure the corresponding key and certificate settings in
+`mkosi.local.conf`. For a smartcard, the settings can use a PKCS#11 URI such as:
 
 ```
 [Validation]
@@ -155,7 +136,7 @@ With a YubiKey you can generate a key and certificate in PIV:
 ykman piv keys generate --algorithm RSA2048 9c pubkey.pem
 ykman piv certificates generate --subject "CN=mkosi" 9c pubkey.pem
 rm pubkey.pem
-pkcs11-tool --module /usr/lib/x86_64-linux-gnu/opensc-pkcs11.so --list-objects --type cert
+pkcs11-tool --module /usr/lib/opensc-pkcs11.so --list-objects --type cert
 # Should print something like:
 Using slot 0 with a present token (0x0)
 Certificate Object; type = X.509 cert
@@ -240,7 +221,7 @@ run the following to configure systemd-homed for the best experience:
 homectl update \
     --auto-resize-mode=off \
     --disk-size=max \
-    --luks-discard=on"
+    --luks-discard=on
 ```
 
 Disabling the auto resize mode avoids slow system boot and shutdown. Enabling
