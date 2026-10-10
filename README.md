@@ -1,254 +1,270 @@
 # ⸭ ParticleOS
 
-ParticleOS is a fully customizable immutable distribution implementing the
-concepts described in
-[Fitting Everything Together](https://0pointer.net/blog/fitting-everything-together.html).
+ParticleOS is a customizable, immutable Arch Linux system built with
+[mkosi](https://github.com/systemd/mkosi). You choose the packages, build the
+image, and sign it with your own keys. This repository configures an Intel
+laptop with a Sway desktop and development tools by default.
 
-Note that ParticleOS is still in development, and we don't provide any backwards
-compatibility guarantees at all.
+The design follows systemd's
+[Fitting Everything Together](https://0pointer.net/blog/fitting-everything-together.html):
+a signed operating system image, separate writable state, and image-based
+updates.
 
-The crucial difference that makes ParticleOS unique compared to other immutable
-distributions is that users build the ParticleOS image themselves and sign it
-with their own keys instead of installing vendor signed images. This allows
-configuring the image to your liking by having full control over which
-packages are installed into the Arch Linux-based image.
+**ParticleOS is under development and provides no backwards compatibility
+guarantees.** Only Arch Linux images are supported.
 
-The ParticleOS image is built using [mkosi](https://github.com/systemd/mkosi).
-You will need to install the current main branch of mkosi to build current
-ParticleOS images.
+## How it works
 
-First, configure the variant you'd like to build in `mkosi.local.conf`. For a
-desktop system, you'll want the `desktop` and one of `gnome`, `kde`, or
-`sway` profiles.
+- **Immutable operating system:** `/usr` is a compressed EROFS partition with
+  dm-verity data and a signature. Package changes happen when building an image.
+- **User-controlled signing:** Secure Boot, expected PCR signatures, and verity
+  signatures use your keys. The checked-in configuration selects a PKCS#11 token.
+- **Writable state:** installation repartitioning defines a TPM2-encrypted
+  Btrfs root, encrypted swap, and a separate Btrfs home partition.
+  User homes are managed with systemd-homed.
+- **Image updates:** systemd-sysupdate transfers the new `/usr`, verity artifacts,
+  and unified kernel image (UKI). The layout provides two sets of `/usr`
+  partitions, and UKI updates use boot counting.
+- **Applications and development:** the desktop includes Flatpak and a Flathub
+  remote definition; the development profile includes Podman, mise, and an
+  sdme-based AUR package builder.
 
-```conf
-[Distribution]
-Distribution=arch
+The base uses `linux-hardened` and includes AppArmor. IPE enforcement is disabled
+in the default boot command line; a separate UKI profile requests enforcement.
+These are configured features, not a guarantee that every hardware and software
+combination has been validated.
 
-[Config]
-Profiles=desktop,kde
+## Build an image
+
+### Prerequisites
+
+Use an existing Linux build host with a current main-branch version of mkosi.
+[`mkosi.conf`](mkosi.conf) requires at least `26~devel`; new systemd features
+such as `systemd-sysinstall` must also be available in the image's packages.
+The build downloads Arch packages and a mkosi tools tree.
+
+For the optional AUR preparation workflow, use **Arch Linux x86_64** with
+mise, sdme, and `particleos-aur` already installed, plus curl, sha256sum, and
+Pacman. Preparation does not bootstrap the host tools.
+
+```sh
+git clone https://github.com/chirpcel/particleos.git
+cd particleos
 ```
 
-It is also strongly recommended to write a hashed root password prefixed with
-`hashed:` to `mkosi.rootpw` to allow debugging the system if something breaks.
+### Choose profiles and packages
 
-To build the image, run `mkosi -B -f` from the ParticleOS repository.
-Only Arch Linux (`Distribution=arch`) is supported.
+The default profiles are `intel,laptop,desktop,devel`. The profiles available
+in this checkout are:
 
-To update the system after installation, you clone the ParticleOS repository
-or your fork of it, make sure `mkosi.local.conf` is configured to your liking and
-run `mkosi -B -ff sysupdate -- update --reboot` which will update the system using
-`systemd-sysupdate` and then reboot.
+| Profile | Contents |
+| --- | --- |
+| `intel` | Intel microcode, firmware, graphics, media, and OpenVINO packages |
+| `laptop` | Wi-Fi, Bluetooth, brightness, WWAN, and power management packages |
+| `desktop` | Sway with UWSM, greetd/tuigreet, Foot, Fuzzel, PipeWire, and Flatpak |
+| `devel` | Git, mise, Podman, krun, sdme, and the `particleos-aur` helper |
 
-## Building AUR packages
+Put local overrides in `mkosi.local.conf`. For example, to build the desktop
+and development environment without the Intel and laptop package selections:
 
-Configure the space-separated `AUR_PACKAGES` list in `mise.toml` with AUR package
-bases that produce a same-named package, then run:
+```ini
+[Config]
+Profiles=desktop,devel
+
+[Content]
+Packages=htop
+```
+
+Retain `devel` if you want its tools in the resulting image. There are no
+separate `gnome`, `kde`, `sway`, `obs-repos`, or `obs-repos-stable` profiles
+in this checkout; Sway is part of `desktop`.
+
+### Configure signing
+
+The defaults select the private key and certificate with PKCS#11 URI
+`pkcs11:token=Database Key;id=%%02`, using `provider:pkcs11` for all three
+signing purposes. Use that token, or override the key, certificate, and source
+settings in `mkosi.local.conf` to match your own hardware token. Keep the
+double percent signs when specifying the key ID in mkosi configuration.
+
+To use local file-based keys instead, first generate them:
+
+```sh
+mkosi genkey
+```
+
+Then add these overrides to `mkosi.local.conf`:
+
+```ini
+[Validation]
+SecureBootKey=mkosi.key
+SecureBootKeySource=file
+SecureBootCertificate=mkosi.crt
+SecureBootCertificateSource=file
+SignExpectedPcrKey=mkosi.key
+SignExpectedPcrKeySource=file
+SignExpectedPcrCertificate=mkosi.crt
+SignExpectedPcrCertificateSource=file
+VerityKey=mkosi.key
+VerityKeySource=file
+VerityCertificate=mkosi.crt
+VerityCertificateSource=file
+```
+
+Keep your private key safe and backed up: you need it to sign future updates.
+Generating files alone does not replace the repository's PKCS#11 defaults.
+
+For emergency debugging, it is also strongly recommended to put a hashed root
+password, prefixed with `hashed:`, in `mkosi.rootpw`.
+
+### Build and try it
+
+```sh
+mkosi -B -f
+mkosi vm
+```
+
+Artifacts go to `mkosi.output/`, with names based on
+`ParticleOS_<version>_<architecture>`. The build produces a disk image, a
+split UKI, partition artifacts, and a JSON manifest. Build caches live in
+`mkosi.cache/`; `mkosi.bump` generates UTC timestamp versions.
+
+The VM defaults are 4 CPUs, 4 GiB RAM, a 30 GiB runtime disk, and ephemeral
+execution. In `mkosi vm`, the root password is `particleos`; the supplied
+home credential creates a `particleos` user with password `particleos`.
+Runtime credentials also enable console autologin. These are development
+defaults.
+
+## Optional: include AUR packages
+
+Set the whitespace-separated `AUR_PACKAGES` value in [`mise.toml`](mise.toml)
+to the AUR package bases you want. Each base must emit a same-named package.
 
 ```sh
 mise run prepare
 mkosi -B -f
 ```
 
-`prepare` assumes `sdme` and `particleos-aur` are already installed on the build
-host; it does not bootstrap them. It downloads the checksum-pinned native Arch
-sdme package and builds the configured AUR packages into `mkosi.packages/`.
-It also selects those packages for installation in the image. mkosi uses its
-normal local-package repository and Pacman installation; there is no custom
-binary installer. The `devel` profile includes sdme and the helper in
-subsequent images and is enabled by default; retain it if you override `Profiles=`
-in `mkosi.local.conf`. Preparation also requires curl, sha256sum, and Pacman for
-read-only package metadata queries. It never installs packages on the build host.
+[`scripts/prepare.sh`](scripts/prepare.sh) downloads the checksum-pinned
+sdme 0.21.0 x86_64 Arch package and invokes `particleos-aur` for each configured
+base. Even an empty AUR list stages sdme. It publishes archives into
+`mkosi.packages/` and writes `mkosi.conf.d/90-aur.conf` to select the
+development profile and requested packages. mkosi installs these through its
+normal local-package repository and Pacman workflow.
 
-For a single build, use `particleos-aur --output /path/to/packages PKGBASE`.
-Use `particleos-aur --reset` to remove your container and its imported base.
-The helper always uses a fresh checkout and asks for review before building.
+Preparation publishes packages after all builds succeed and prunes stale
+archives for package identities it manages, preserving unrelated local packages.
+It does not install packages on the build host.
 
-`particleos-aur` uses [sdme](https://github.com/fiorix/sdme) to create or reuse an
-independent mutable Arch container, runs `makepkg` as an unprivileged guest user,
-and exports packages without installing anything on the host. Administrative
-authorization is needed for sdme operations. Dependencies available only in the
-AUR are not resolved automatically.
-
-AUR recipes execute arbitrary code: review and trust the configured packages.
-Containers share the host kernel, so use a VM for untrusted recipes. `/usr`
-remains immutable; container state lives under `/var/lib/sdme/` and can be lost
-during factory reset. Internet access and working host networkd are required.
-IPE enforcement may prevent execution of mutable guest binaries; the builder
-never disables it.
-
-## Using the OBS profile to fetch a newer systemd
-
-Sometimes ParticleOS adopts systemd features as soon as they get merged into
-systemd without waiting for an official release. That's why we recommend
-enabling the `obs-repos` profile to enable the systemd repositories on OBS
-(https://software.opensuse.org//download.html?project=system%3Asystemd&package=systemd)
-containing systemd packages which are built every day from systemd's git main
-branch.
-
-To enable the `obs-repos` profile, add the following to `mkosi.local.conf`:
-
-```conf
-[Config]
-Profiles=obs-repos
-```
-
-We also provide the `obs-repos-stable` profile, that will use the latest stable
-branch of systemd, instead of main, providing more stability and less risk, as
-it is what distributions typically use. To enable this profile, add the
-following to `mkosi.local.conf`:
-
-```conf
-[Config]
-Profiles=obs-repos-stable
-```
-
-## Building systemd from source
-
-As an alternative to using the `obs-repos` profile, you can build systemd from source:
+For a standalone build:
 
 ```sh
-git clone https://github.com/systemd/systemd
-cd systemd
-mkosi -f sandbox -- meson setup build
-mkosi -f sandbox -- meson compile -C build
-mkosi -t none -f
+particleos-aur --output /path/to/packages PKGBASE
 ```
 
-Then write the following to `mkosi.local.conf` in the ParticleOS repository to
-use the artifacts from the systemd repository built by mkosi in ParticleOS:
+The helper runs as an ordinary user and uses `run0` to authorize sdme
+operations. It imports an Arch base and creates or reuses a mutable container
+with user namespaces, then runs `makepkg` as an unprivileged guest user.
+Each invocation checks out fresh AUR sources and prompts for review before
+building. Dependencies available only in the AUR are not resolved automatically.
 
-```conf
-[Content]
-VolatilePackageDirectories=../systemd/build/mkosi.builddir/<distribution>~<release>~<arch>
+AUR recipes execute arbitrary code. Review the recipes; containers share the
+host kernel, so use a VM for untrusted builds. Internet access and working host
+systemd-networkd are required. IPE enforcement may block mutable guest binaries;
+the helper never disables it.
 
-[Build]
-ExtraSearchPaths=../systemd/build
-```
-
-Make sure the distribution and release in `mkosi.local.conf` are identical in the
-systemd checkout and the particleos checkout.
-
-To build a newer systemd, run `git pull` in the systemd repository followed by
- `mkosi -f sandbox -- meson compile -C build` and `mkosi -t none`.
-
-## Signing keys
-
-ParticleOS images are signed for Secure Boot with the user's keys. To generate a new key,
-run `mkosi genkey`. The key must be stored safely, it will be required to sign updates.
-
-The key can be stored in a smartcard. Then you have to set the key in `mkosi.local.conf`:
-
-```
-[Validation]
-SecureBootKey=pkcs11:object=Private key 1;type=private
-SecureBootKeySource=provider:pkcs11
-SignExpectedPcrKey=pkcs11:object=Private key 1;type=private
-SignExpectedPcrKeySource=provider:pkcs11
-VerityKey=pkcs11:object=Private key 1;type=private
-VerityKeySource=provider:pkcs11
-```
-
-With a YubiKey you can generate a key and certificate in PIV:
+To remove your builder container and its imported base:
 
 ```sh
-ykman piv keys generate --algorithm RSA2048 9c pubkey.pem
-ykman piv certificates generate --subject "CN=mkosi" 9c pubkey.pem
-rm pubkey.pem
-pkcs11-tool --module /usr/lib/x86_64-linux-gnu/opensc-pkcs11.so --list-objects --type cert
-# Should print something like:
-Using slot 0 with a present token (0x0)
-Certificate Object; type = X.509 cert
-  label:      Certificate for Digital Signature
-  subject:    DN: CN=mkosi
-  serial:     ...
-  ID:         02
-  uri:        pkcs11:model=PKCS%2315%20emulated;manufacturer=piv_II;serial=...;token=mkosi;id=%02;object=Certificate%20for%20Digital%20Signature;type=cert
+particleos-aur --reset
 ```
 
-Then you have to set the key with the right token and key ID in `mkosi.local.conf`:
+Container state lives under `/var/lib/sdme/` and can be lost during factory reset.
 
-```
-[Validation]
-SecureBootKey=pkcs11:token=mkosi;id=%%02;type=private
-SecureBootKeySource=provider:pkcs11
-SecureBootCertificate=pkcs11:token=mkosi;id=%%02;type=cert
-SecureBootCertificateSource=provider:pkcs11
-SignExpectedPcrKey=pkcs11:token=mkosi;id=%%02;type=private
-SignExpectedPcrKeySource=provider:pkcs11
-SignExpectedPcrCertificate=pkcs11:token=mkosi;id=%%02;type=cert
-SignExpectedPcrCertificateSource=provider:pkcs11
-VerityKey=pkcs11:token=mkosi;id=%%02;type=private
-VerityKeySource=provider:pkcs11
-VerityCertificate=pkcs11:token=mkosi;id=%%02;type=cert
-VerityCertificateSource=provider:pkcs11
-```
+## Install on hardware
 
-## Installation
+Back up the target machine before installation. Writing the USB image and
+installing to the target disk overwrite data.
 
-Before installing ParticleOS, make sure that Secure Boot is in *setup*
-*mode* on the target system. The Secure Boot mode can be configured in
-the UEFI firmware interface of the target system. If there's an
-existing Linux installation on the target system already, run
-`systemctl reboot --firmware-setup` to reboot into the UEFI firmware
-interface. At the same time, make sure the UEFI firmware interface is
-password protected so an attacker cannot just disable Secure Boot
-again.
+1. Put Secure Boot into **setup mode** in the target's UEFI firmware. From an
+   existing Linux installation, `systemctl reboot --firmware-setup` can open
+   the firmware interface. Protect firmware settings with a password.
+2. Build the image and write it to the intended USB drive:
+   `mkosi burn /dev/<usb>`.
+3. Boot the USB drive and select the **Installer** UKI profile.
+   `systemd-sysinstall` prompts for the target drive and configuration,
+   partitions the disk, copies the system, and installs the boot loader and UKI.
+4. Reboot from the target disk into the default profile.
 
-To install ParticleOS with a USB drive, first build the image on an
-existing Linux system as described above. Then, write it to the USB
-drive with `mkosi burn /dev/<usb>`. Once written to the USB drive, plug
-the USB drive into the system onto which you'd like to install
-ParticleOS and boot into the USB drive via the firmware menu. Then,
-boot into the "Installer" UKI profile, which runs
-`systemd-sysinstall`. It will prompt for the target drive and any
-other details required, then partition the disk, copy ParticleOS onto
-it, set up the ESP via `bootctl install` and finally install a kernel
-via `bootctl link`. Once it completes, reboot into the target drive
-(i.e not the USB drive) and the default profile (i.e. not the
-installer one) to complete the installation.
+For a manual installation, select **Live System** and run
+`systemd-sysinstall` from its root shell. Run it without arguments for
+interactive configuration, or consult `systemd-sysinstall(8)` for options.
+The live profile provides root autologin and the root password `particleos`.
 
-If you prefer to drive the install manually, boot into the "Live
-System" UKI profile instead. When you end up in the root shell, run
-`systemd-sysinstall` to install ParticleOS to the system's drive,
-then reboot as above. If you invoke `systemd-sysinstall` without
-arguments it will interactively query you for configuration
-parameters, as necessary. You may alternatively configure the new
-installation with command line parameters of the tool, see the
-systemd-sysinstall(8) man page for details.
+## Update an installed system
 
-## LUKS recovery key
-
-systemd doesn't support adding a recovery key to a partition enrolled with a token
-only (tpm/fido2). It is possible to use cryptenroll to add a recovery password
-to the root partition: `cryptsetup luksAddKey --token-type systemd-tpm2 /dev/<id>`
-
-## Firmwares
-
-Only firmwares that are dependencies of a kernel module are included, but some
-modules don't declare their dependencies properly. Dependencies of a module can be
-found with `modinfo`. If you experience missing firmwares, you should report
-this to the module maintainer. `FirmwareInclude=` can be added in `mkosi.local.conf`
-to include the firmware regardless of whether a module depends on it.
-
-## Configuring systemd-homed after installation
-
-After installing ParticleOS and logging into your systemd-homed managed user,
-run the following to configure systemd-homed for the best experience:
+Clone this repository or your fork on the installed system, restore your local
+configuration, and use the same signing identity as your installed image.
+If you use AUR packages, run `mise run prepare` before building the update.
 
 ```sh
-homectl update \
+mkosi -B -ff sysupdate -- update --reboot
+```
+
+This rebuilds the image, applies it with systemd-sysupdate, and reboots.
+The transfer definitions in [`mkosi.sysupdate/`](mkosi.sysupdate/) consume
+locally built artifacts. To change system packages, edit the image configuration
+and rebuild; `/usr` and the Pacman local database reside in the immutable image.
+
+## Recovery and troubleshooting
+
+The [UKI profiles](mkosi.uki-profiles/) include Live System, Installer, IPE
+enforcement, emergency mode, debug logging, storage target mode, and factory
+reset options. **Factory reset can erase writable root and home state**;
+one option also clears the TPM2. Storage target mode explicitly provides public
+access. Choose these profiles deliberately.
+
+For a TPM2-enrolled LUKS root, the existing token can authorize adding a recovery
+passphrase:
+
+```sh
+cryptsetup luksAddKey --token-type systemd-tpm2 /dev/<root-partition>
+```
+
+For systemd-homed tuning, after logging in as the managed user, update that
+user's home:
+
+```sh
+homectl update "$USER" \
     --auto-resize-mode=off \
     --disk-size=max \
-    --luks-discard=on"
+    --luks-discard=on
 ```
 
-Disabling the auto resize mode avoids slow system boot and shutdown. Enabling
-LUKS discard makes sure the home directory doesn't become inaccessible because
-systemd-homed is unable to resize the home directory.
+Disabling automatic resizing avoids resizing delays at boot and shutdown.
+Allowing LUKS discard supports space reclamation in the home image.
 
-## Default root password and user when booting in a virtual machine
+If firmware is missing, check the module's dependencies with `modinfo`.
+Only firmware associated with included kernel modules is normally included;
+add `FirmwareInclude=` under `[Content]` in `mkosi.local.conf` when a module
+does not declare its firmware correctly.
 
-If you boot ParticleOS in a virtual machine using `mkosi vm`, the root password
-is automatically set to `particleos` and a default user `particleos` with password
-`particleos` is created as well.
+## Repository layout
+
+| Path | Purpose |
+| --- | --- |
+| [`mkosi.conf`](mkosi.conf) | Base packages, default profiles, signing, output, and VM settings |
+| [`mkosi.profiles/`](mkosi.profiles/) | Optional package selections and profile-specific files |
+| [`mkosi.extra/`](mkosi.extra/) | Boot, systemd, networking, and factory configuration |
+| [`mkosi.repart/`](mkosi.repart/) | Build-time disk partitions and verity artifacts |
+| [`mkosi.sysupdate/`](mkosi.sysupdate/) | Installed-system update transfers |
+| [`mkosi.uki-profiles/`](mkosi.uki-profiles/) | Alternate boot and recovery modes |
+| `mkosi.postinst*`, `mkosi.finalize` | Arch validation, branding, Pacman database relocation, and factory defaults |
+| [`mise.toml`](mise.toml), [`scripts/prepare.sh`](scripts/prepare.sh) | Local package preparation |
+
+Local configuration, keys, outputs, caches, and prepared packages are excluded
+from Git by [`.gitignore`](.gitignore).
+
+## License
+
+GNU LGPL 2.1 or later; see [LICENSE](LICENSE) and the source file SPDX headers.
