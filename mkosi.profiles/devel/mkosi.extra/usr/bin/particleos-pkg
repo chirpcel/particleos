@@ -7,7 +7,7 @@ set -euo pipefail
 umask 077
 
 die() {
-    echo "particleos-aur: $*" >&2
+    echo "particleos-pkg: $*" >&2
     exit 1
 }
 
@@ -16,7 +16,7 @@ die() {
 source /etc/os-release
 [[ $(uname -m) == x86_64 && ${ID:-} == arch ]] || die "Arch x86_64 required."
 
-output=${XDG_STATE_HOME:-$HOME/.local/state}/particleos/aur-builder/packages
+output=${XDG_STATE_HOME:-$HOME/.local/state}/particleos/pkg-builder/packages
 reset=false
 
 if [[ ${1:-} == --reset ]]; then
@@ -29,16 +29,21 @@ elif [[ ${1:-} == --output ]]; then
 fi
 
 if $reset; then
-    [[ $# == 0 ]] || die "Usage: particleos-aur --reset"
+    [[ $# == 0 ]] || die "Usage: particleos-pkg --reset"
 else
-    [[ $# == 1 && $1 =~ ^[a-z0-9][a-z0-9@._+-]{0,127}$ ]] ||
-        die "Usage: particleos-aur [--output DIR] PKGBASE"
-    package=$1
+    [[ $# == 1 && -n $1 ]] || die "Usage: particleos-pkg [--output DIR] PKGDIR"
+    [[ -d $1 && ! -L $1 ]] || die "Not a package directory: $1"
+    source=$(realpath -- "$1")
+    package=${source##*/}
+    [[ $package =~ ^[a-z0-9][a-z0-9@._+-]{0,127}$ ]] ||
+        die "Invalid package directory name: $package"
+    [[ -f $source/PKGBUILD && ! -L $source/PKGBUILD ]] ||
+        die "No PKGBUILD in $source (uninitialized git submodule?)"
 fi
 
-machine=particleos-aur-$(id -u)-x86-64
+machine=particleos-pkg-$(id -u)-x86-64
 base=$machine-base
-state=${XDG_STATE_HOME:-$HOME/.local/state}/particleos/aur-builder
+state=${XDG_STATE_HOME:-$HOME/.local/state}/particleos/pkg-builder
 mkdir -p -- "$state"
 exec 9>"$state/lock"
 flock -n 9 || die "Another build is running."
@@ -105,20 +110,14 @@ guest root '
 mkdir -p -- "$output"
 stage=$(mktemp -d -- "$output/.build-XXXXXX")
 
-guest builder '
-    cd /home/builder
-    rm -rf build
-    git clone -- "https://aur.archlinux.org/$1.git" build >&2
-    cd build
-
-    git ls-files | while IFS= read -r file; do
-        printf "\n--- %s ---\n" "$file"
-        git show "HEAD:$file"
-    done
-' "$package" | LC_ALL=C sed -n l
-printf 'AUR code shares the host kernel. Build this revision? Type yes: ' >&2
-IFS= read -r answer
-[[ $answer == yes ]] || die "Build declined."
+# The recipe is streamed through stdin; repository metadata is never copied.
+tar --create --exclude=.git --directory="$source" --file=- . |
+    guest builder '
+        cd /home/builder
+        rm -rf build
+        mkdir build
+        tar --extract --no-same-owner --no-same-permissions --directory=build --file=-
+    '
 
 # PKGBUILD evaluation is always unprivileged, including dependency discovery.
 guest builder 'cd /home/builder/build; makepkg --printsrcinfo' >"$stage/srcinfo"

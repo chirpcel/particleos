@@ -3,7 +3,7 @@
 
 set -euo pipefail
 
-stage=$(mktemp -d .aur-prepare-XXXXXX)
+stage=$(mktemp -d .pkg-prepare-XXXXXX)
 trap 'rm -rf -- "$stage"' EXIT
 mkdir -p "$stage/packages" mkosi.conf.d
 
@@ -21,18 +21,26 @@ else
     printf '%s  %s\n' "$checksum" "$package" | sha256sum --check --status
 fi
 
-printf '[Config]\nProfiles=devel\n\n[Content]\n' >"$stage/90-aur.conf"
-read -ra packages <<<"${AUR_PACKAGES//$'\n'/ }"
+printf '[Config]\nProfiles=devel\n\n[Content]\n' >"$stage/90-packages.conf"
 
-for name in "${packages[@]}"; do
+# Every top-level folder in packages/ is a package base named like the package.
+for dir in packages/*/; do
+    [[ -d $dir ]] || continue
+    dir=${dir%/}
+    name=${dir##*/}
     [[ $name =~ ^[a-z0-9][a-z0-9@._+-]{0,127}$ && $name != sdme ]] ||
         {
-            echo "Invalid AUR package base: $name" >&2
+            echo "Invalid package directory: $dir" >&2
+            exit 1
+        }
+    [[ -f $dir/PKGBUILD ]] ||
+        {
+            echo "No PKGBUILD in $dir; run: git submodule update --init" >&2
             exit 1
         }
 
-    particleos-aur --output "$stage/packages" "$name"
-    printf 'Packages=%s\n' "$name" >>"$stage/90-aur.conf"
+    particleos-pkg --output "$stage/packages" "$dir"
+    printf 'Packages=%s\n' "$name" >>"$stage/90-packages.conf"
 done
 
 # Track package identities, not filename prefixes: foo must not prune foo-bar.
@@ -43,9 +51,11 @@ for archive in "$stage/packages/"*.pkg.tar.*; do
 done | sort -u >"$stage/names"
 
 cat "$stage/names" >"$stage/managed"
-if [[ -f mkosi.packages/.particleos-aur-names ]]; then
-    cat mkosi.packages/.particleos-aur-names >>"$stage/managed"
-fi
+for names in mkosi.packages/.particleos-pkg-names mkosi.packages/.particleos-aur-names; do
+    if [[ -f $names ]]; then
+        cat -- "$names" >>"$stage/managed"
+    fi
+done
 
 mkdir -p mkosi.packages
 : >"$stage/stale"
@@ -68,5 +78,6 @@ while IFS= read -r archive; do
     rm -f -- "$archive"
 done <"$stage/stale"
 
-mv -T -- "$stage/names" mkosi.packages/.particleos-aur-names
-mv -T -- "$stage/90-aur.conf" mkosi.conf.d/90-aur.conf
+mv -T -- "$stage/names" mkosi.packages/.particleos-pkg-names
+mv -T -- "$stage/90-packages.conf" mkosi.conf.d/90-packages.conf
+rm -f -- mkosi.packages/.particleos-aur-names mkosi.conf.d/90-aur.conf
