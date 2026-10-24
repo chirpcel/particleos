@@ -40,19 +40,29 @@ or your fork of it, make sure `mkosi.local.conf` is configured to your liking an
 run `mkosi -B -ff sysupdate -- update --reboot` which will update the system using
 `systemd-sysupdate` and then reboot.
 
-## Building AUR packages
+## Building packages
 
-Configure the space-separated `AUR_PACKAGES` list in `mise.toml` with AUR package
-bases that produce a same-named package, then run:
+Every top-level folder in `packages/` is a package base. The folder is named like
+the package it produces and contains the `PKGBUILD` and its resources, laid out
+like an AUR repository. Build them all with:
 
 ```sh
 mise run prepare
 mkosi -B -f
 ```
 
-`prepare` assumes `sdme` and `particleos-aur` are already installed on the build
+There is no connection to the AUR. To use an AUR package, add its repository as
+a git submodule named like the package and commit the pinned revision:
+
+```sh
+git submodule add https://aur.archlinux.org/PKGNAME.git packages/PKGNAME
+```
+
+After cloning, run `git submodule update --init` to fetch submodule packages.
+
+`prepare` assumes `sdme` and `particleos-pkg` are already installed on the build
 host; it does not bootstrap them. It downloads the checksum-pinned native Arch
-sdme package and builds the configured AUR packages into `mkosi.packages/`.
+sdme package and builds every package in `packages/` into `mkosi.packages/`.
 It also selects those packages for installation in the image. mkosi uses its
 normal local-package repository and Pacman installation; there is no custom
 binary installer. The `devel` profile includes sdme and the helper in
@@ -60,18 +70,18 @@ subsequent images and is enabled by default; retain it if you override `Profiles
 in `mkosi.local.conf`. Preparation also requires curl, sha256sum, and Pacman for
 read-only package metadata queries. It never installs packages on the build host.
 
-For a single build, use `particleos-aur --output /path/to/packages PKGBASE`.
-Use `particleos-aur --reset` to remove your container and its imported base.
-The helper always uses a fresh checkout and asks for review before building.
+For a single build, use `particleos-pkg --output /path/to/packages PKGDIR`.
+Use `particleos-pkg --reset` to remove your container and its imported base.
+The helper copies the package folder (without `.git`) into a fresh build directory.
 
-`particleos-aur` uses [sdme](https://github.com/fiorix/sdme) to create or reuse an
+`particleos-pkg` uses [sdme](https://github.com/fiorix/sdme) to create or reuse an
 independent mutable Arch container, runs `makepkg` as an unprivileged guest user,
 and exports packages without installing anything on the host. Administrative
-authorization is needed for sdme operations. Dependencies available only in the
-AUR are not resolved automatically.
+authorization is needed for sdme operations. Dependencies that are not in the
+Arch repositories are not resolved automatically.
 
-AUR recipes execute arbitrary code: review and trust the configured packages.
-Containers share the host kernel, so use a VM for untrusted recipes. `/usr`
+PKGBUILDs execute arbitrary code: review every package and submodule revision
+before committing it. Containers share the host kernel, so use a VM for untrusted recipes. `/usr`
 remains immutable; container state lives under `/var/lib/sdme/` and can be lost
 during factory reset. Internet access and working host networkd are required.
 IPE enforcement may prevent execution of mutable guest binaries; the builder
